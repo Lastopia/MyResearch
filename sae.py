@@ -1,0 +1,503 @@
+import csv
+import math
+import time
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from metrics import compute_dead_feature_rate, compute_l0
+from para import PATH
+from utils import (
+    ensure_dir,
+    get_device,
+    load_json,
+    manifest_is_current,
+    save_json,
+    save_manifest,
+    set_seed,
+)
+from visualize import plot_sae_health_curves, plot_sae_training_curves
+
+
+class TopKSAE(nn.Module):
+    def __init__(self, input_dim, dict_size, k):
+        super().__init__()
+        self.k = k
+        self.encoder = nn.Linear(input_dim, dict_size)
+        self.decoder = nn.Linear(dict_size, input_dim, bias=False)
+        nn.init.kaiming_uniform_(self.encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.decoder.weight, a=5**0.5)
+
+    def encode(self, x):
+        acts = F.relu(self.encoder(x))
+        values, indices = torch.topk(acts, k=min(self.k, acts.size(-1)), dim=-1)
+        sparse = torch.zeros_like(acts)
+        sparse.scatter_(-1, indices, values)
+        return sparse
+
+    def forward(self, x):
+        acts = self.encode(x)
+        recon = self.decoder(acts)
+        return recon, acts
+
+
+class SelfSAE:
+    def __init__(self, sae_cfg, train_res, data_res):
+        self.sae_cfg = sae_cfg
+        self.train_res = train_res
+        self.data_res = data_res
+        self.device = get_device(getattr(sae_cfg, "device", "cuda"))
+
+    def loader(self, split):
+        return torch.utils.data.DataLoader(
+            self.data_res[split],
+            batch_size=getattr(self.sae_cfg, "activation_batch_size", 1),
+            shuffle=False,
+            drop_last=False,
+        )
+
+    def stage_config(self):
+        train_summary = {}
+        for model_name, seeds in self.train_res.items():
+            train_summary[model_name] = {}
+            for seed, item in seeds.items():
+                state = item["train_state"]
+                train_summary[model_name][str(seed)] = state.get("checkpoint_selection", {}).get("primary")
+        return {
+            "sae": self.sae_cfg,
+            "train_checkpoints": train_summary,
+            "data_meta": self.data_res.get("meta", {}),
+        }
+
+    def stage_outputs(self):
+        return [
+            Path(PATH.raw_metrics_dir) / "sae_res.json",
+            Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
+        ]
+
+    def stage_manifest_path(self):
+        return Path(PATH.raw_metrics_dir) / "sae_manifest.json"
+
+    def load_completed_sae_res(self):
+        serializable_path = Path(PATH.raw_metrics_dir) / "sae_res.json"
+        if not serializable_path.exists():
+            return None
+        serializable = load_json(serializable_path)
+        sae_res = {}
+        for model_name, model_item in serializable.items():
+            sae_res[model_name] = {}
+            for model_seed_text, seed_item in model_item.items():
+                model_seed = int(model_seed_text)
+                sae_res[model_name][model_seed] = {}
+                for layer_text, items in seed_item.items():
+                    layer = int(layer_text)
+                    layer_res = []
+                    for item in items:
+                        ckpt_path = item.get("checkpoint_path")
+                        if not ckpt_path or not Path(ckpt_path).exists():
+                            return None
+                        meta = item["meta"]
+                        ckpt = torch.load(ckpt_path, map_location=self.device)
+                        sae = TopKSAE(
+                            ckpt["normalization"]["mean"].size(-1),
+                            meta["dict_size"],
+                            meta["k"],
+                        ).to(self.device)
+                        sae.load_state_dict(ckpt["sae"])
+                        layer_res.append(
+                            {
+                                "sae": sae,
+                                "meta": meta,
+                                "metrics": item["metrics"],
+                                "normalization_summary": item["normalization_summary"],
+                                "normalization": ckpt["normalization"],
+                                "checkpoint_path": ckpt_path,
+                            }
+                        )
+                    sae_res[model_name][model_seed][layer] = layer_res
+        return sae_res
+
+    @torch.no_grad()
+    def collect_activations(self, model, layer, split, max_tokens):
+        model.eval()
+        acts = []
+        seen = 0
+        for x, _ in self.loader(split):
+            x = x.to(self.device)
+            out = model(x, capture_layers=[layer])
+            if layer not in out["activations"]:
+                raise ValueError(f"Layer {layer} was not captured; model has fewer layers than requested")
+            flat = out["activations"][layer].reshape(-1, out["activations"][layer].size(-1)).float().cpu()
+            take = min(flat.size(0), max_tokens - seen)
+            if take > 0:
+                acts.append(flat[:take])
+                seen += take
+            if seen >= max_tokens:
+                break
+        if not acts:
+            raise RuntimeError(f"No activations collected for split={split}, layer={layer}")
+        return torch.cat(acts, dim=0)
+
+    def activation_stats(self, activations):
+        mean = activations.mean(dim=0, keepdim=True)
+        std = activations.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-6)
+        return {"mean": mean, "std": std}
+
+    def normalize(self, activations, stats):
+        if not getattr(self.sae_cfg, "normalize_activations", True):
+            return activations
+        return (activations - stats["mean"]) / stats["std"]
+
+    def explained_variance(self, x, recon):
+        total_var = x.var(dim=0, unbiased=False).sum().clamp_min(1e-9)
+        residual_var = (x - recon).var(dim=0, unbiased=False).sum()
+        return 1.0 - (residual_var / total_var).item()
+
+    def feature_health(self, feature_acts):
+        active = feature_acts != 0
+        frequencies = active.float().mean(dim=0)
+        active_features = frequencies > getattr(self.sae_cfg, "dead_feature_threshold", 0.0)
+        reuse_threshold = getattr(self.sae_cfg, "feature_reuse_frequency_threshold", 0.001)
+        reused_features = frequencies >= reuse_threshold
+        probs = frequencies / frequencies.sum().clamp_min(1e-9)
+        entropy = -(probs * probs.clamp_min(1e-9).log()).sum().item()
+        max_entropy = math.log(max(feature_acts.size(-1), 2))
+        quantiles = torch.quantile(frequencies.float(), torch.tensor([0.5, 0.9, 0.99]))
+        return {
+            "l0": compute_l0(feature_acts).item(),
+            "average_active_features_per_token": active.float().sum(dim=-1).mean().item(),
+            "dead_feature_rate": compute_dead_feature_rate(feature_acts).item(),
+            "active_feature_rate": active_features.float().mean().item(),
+            "feature_reuse_rate": reused_features.float().mean().item(),
+            "top_feature_activation_frequency": frequencies.max().item(),
+            "feature_frequency_entropy": entropy,
+            "feature_frequency_entropy_normalized": entropy / max_entropy,
+            "feature_density_distribution": {
+                "mean": frequencies.mean().item(),
+                "std": frequencies.std(unbiased=False).item(),
+                "p50": quantiles[0].item(),
+                "p90": quantiles[1].item(),
+                "p99": quantiles[2].item(),
+                "max": frequencies.max().item(),
+            },
+        }
+
+    @torch.no_grad()
+    def evaluate_sae(self, sae, data):
+        sae.eval()
+        recon, feature_acts = sae(data)
+        mse = F.mse_loss(recon, data).item()
+        health = self.feature_health(feature_acts)
+        return {
+            "validation_mse": mse,
+            "reconstruction_loss": mse,
+            "normalized_reconstruction_mse": mse,
+            "explained_variance": self.explained_variance(data, recon),
+            **health,
+        }
+
+    def train_one_sae(
+        self,
+        train_acts,
+        valid_acts,
+        model_name,
+        model_seed,
+        layer,
+        dict_size,
+        k,
+        sae_seed,
+        stats,
+        model_checkpoint_selection,
+    ):
+        set_seed(sae_seed)
+        sae = TopKSAE(train_acts.size(-1), dict_size, k).to(self.device)
+        opt = torch.optim.Adam(sae.parameters(), lr=self.sae_cfg.lr)
+        train_data = train_acts.to(self.device)
+        valid_data = valid_acts.to(self.device)
+        history = []
+        start_time = time.perf_counter()
+
+        for step in range(1, self.sae_cfg.steps + 1):
+            sae.train()
+            idx = torch.randint(0, train_data.size(0), (self.sae_cfg.batch_size,), device=self.device)
+            batch = train_data[idx]
+            recon, _ = sae(batch)
+            loss = F.mse_loss(recon, batch)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            should_log = step == 1 or step == self.sae_cfg.steps or step % self.sae_cfg.eval_interval == 0
+            if should_log:
+                sample = train_data[: min(train_data.size(0), valid_data.size(0), 8192)]
+                train_eval = self.evaluate_sae(sae, sample)
+                valid_eval = self.evaluate_sae(sae, valid_data)
+                history.append(
+                    {
+                        "step": step,
+                        "train_mse": train_eval["validation_mse"],
+                        "valid_mse": valid_eval["validation_mse"],
+                        "explained_variance": valid_eval["explained_variance"],
+                        "dead_feature_rate": valid_eval["dead_feature_rate"],
+                    }
+                )
+
+        elapsed = time.perf_counter() - start_time
+        metrics = self.evaluate_sae(sae, valid_data)
+        metrics["training_seconds"] = elapsed
+        metrics["seconds_per_step"] = elapsed / max(self.sae_cfg.steps, 1)
+        metrics["tokens_per_second"] = (
+            self.sae_cfg.steps * self.sae_cfg.batch_size / elapsed if elapsed > 0 else None
+        )
+        metrics["final_train_mse"] = history[-1]["train_mse"] if history else None
+        metrics["history"] = history
+
+        ensure_dir(Path(PATH.ckpt_dir) / "saes")
+        ckpt = Path(PATH.ckpt_dir) / "saes" / (
+            f"{model_name}_modelseed{model_seed}_"
+            f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}.pt"
+        )
+        torch.save(
+            {
+                "sae": sae.state_dict(),
+                "metrics": metrics,
+                "normalization": {
+                    "mean": stats["mean"].cpu(),
+                    "std": stats["std"].cpu(),
+                    "enabled": getattr(self.sae_cfg, "normalize_activations", True),
+                },
+            },
+            ckpt,
+        )
+
+        figure_prefix = (
+            f"{model_name}_modelseed{model_seed}_"
+            f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}"
+        )
+        plot_sae_training_curves(
+            history,
+            Path(PATH.figure_dir) / f"{figure_prefix}_sae_mse.png",
+            title=f"{model_name} seed {model_seed} L{layer} SAE MSE",
+        )
+        plot_sae_health_curves(
+            history,
+            Path(PATH.figure_dir) / f"{figure_prefix}_sae_health.png",
+            title=f"{model_name} seed {model_seed} L{layer} SAE health",
+        )
+
+        return {
+            "sae": sae,
+            "meta": {
+                "model_name": model_name,
+                "model_seed": model_seed,
+                "sae_seed": sae_seed,
+                "layer": layer,
+                "dict_size": dict_size,
+                "k": k,
+                "activation_site": self.sae_cfg.activation_site,
+                "activation_normalization": getattr(self.sae_cfg, "normalize_activations", True),
+                "model_checkpoint_rule": model_checkpoint_selection["primary"]["selection_rule"],
+                "model_checkpoint_step": model_checkpoint_selection["primary"]["checkpoint_step"],
+                "model_checkpoint_path": model_checkpoint_selection["primary"]["checkpoint_path"],
+                "model_tokens_seen": model_checkpoint_selection["primary"]["tokens_seen"],
+                "train_activation_tokens": train_acts.size(0),
+                "valid_activation_tokens": valid_acts.size(0),
+            },
+            "metrics": metrics,
+            "normalization_summary": {
+                "mean_abs_mean": stats["mean"].abs().mean().item(),
+                "std_mean": stats["std"].mean().item(),
+                "std_min": stats["std"].min().item(),
+                "std_max": stats["std"].max().item(),
+            },
+            "normalization": {
+                "mean": stats["mean"],
+                "std": stats["std"],
+                "enabled": getattr(self.sae_cfg, "normalize_activations", True),
+            },
+            "checkpoint_path": str(ckpt),
+        }
+
+    def mean_std(self, values):
+        clean = [value for value in values if value is not None and math.isfinite(value)]
+        if not clean:
+            return {"mean": None, "std": None}
+        mean = sum(clean) / len(clean)
+        var = sum((value - mean) ** 2 for value in clean) / len(clean)
+        return {"mean": mean, "std": math.sqrt(var)}
+
+    def write_csv(self, rows, path):
+        ensure_dir(Path(path).parent)
+        if not rows:
+            return
+        fieldnames = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def flatten_rows(self, serializable):
+        rows = []
+        for model_name, model_item in serializable.items():
+            for model_seed, seed_item in model_item.items():
+                for layer, layer_items in seed_item.items():
+                    for item in layer_items:
+                        metrics = item["metrics"]
+                        rows.append(
+                            {
+                                "model_name": model_name,
+                                "model_seed": model_seed,
+                                "layer": layer,
+                                "sae_seed": item["meta"]["sae_seed"],
+                                "dict_size": item["meta"]["dict_size"],
+                                "k": item["meta"]["k"],
+                                "model_checkpoint_rule": item["meta"]["model_checkpoint_rule"],
+                                "model_checkpoint_step": item["meta"]["model_checkpoint_step"],
+                                "model_checkpoint_path": item["meta"]["model_checkpoint_path"],
+                                "model_tokens_seen": item["meta"]["model_tokens_seen"],
+                                "validation_mse": metrics["validation_mse"],
+                                "explained_variance": metrics["explained_variance"],
+                                "reconstruction_loss": metrics["reconstruction_loss"],
+                                "normalized_reconstruction_mse": metrics["normalized_reconstruction_mse"],
+                                "l0": metrics["l0"],
+                                "average_active_features_per_token": metrics["average_active_features_per_token"],
+                                "dead_feature_rate": metrics["dead_feature_rate"],
+                                "active_feature_rate": metrics["active_feature_rate"],
+                                "feature_reuse_rate": metrics["feature_reuse_rate"],
+                                "top_feature_activation_frequency": metrics["top_feature_activation_frequency"],
+                                "feature_frequency_entropy_normalized": metrics[
+                                    "feature_frequency_entropy_normalized"
+                                ],
+                                "seconds_per_step": metrics["seconds_per_step"],
+                                "tokens_per_second": metrics["tokens_per_second"],
+                                "checkpoint_path": item["checkpoint_path"],
+                            }
+                        )
+        return rows
+
+    def summarize_rows(self, rows):
+        metrics = [
+            "validation_mse",
+            "explained_variance",
+            "reconstruction_loss",
+            "normalized_reconstruction_mse",
+            "l0",
+            "average_active_features_per_token",
+            "dead_feature_rate",
+            "active_feature_rate",
+            "feature_reuse_rate",
+            "top_feature_activation_frequency",
+            "feature_frequency_entropy_normalized",
+        ]
+        grouped = {}
+        for row in rows:
+            key = (row["model_name"], row["layer"])
+            grouped.setdefault(key, {metric: [] for metric in metrics})
+            for metric in metrics:
+                grouped[key][metric].append(row[metric])
+        summary_rows = []
+        for (model_name, layer), values in grouped.items():
+            row = {"model_name": model_name, "layer": layer}
+            for metric, metric_values in values.items():
+                stats = self.mean_std(metric_values)
+                row[f"{metric}_mean"] = stats["mean"]
+                row[f"{metric}_std"] = stats["std"]
+            summary_rows.append(row)
+        return summary_rows
+
+    def run(self):
+        if (
+            getattr(self.sae_cfg, "skip_completed_stage", True)
+            and manifest_is_current(self.stage_manifest_path(), self.stage_config(), self.stage_outputs())
+        ):
+            loaded = self.load_completed_sae_res()
+            if loaded is not None:
+                return loaded
+
+        sae_res = {}
+        serializable = {}
+        for model_name, seeds in self.train_res.items():
+            sae_res[model_name] = {}
+            serializable[model_name] = {}
+            for model_seed, train_item in seeds.items():
+                model = train_item["model"].to(self.device)
+                model.eval()
+                sae_res[model_name][model_seed] = {}
+                serializable[model_name][str(model_seed)] = {}
+                checkpoint_selection = train_item["train_state"]["checkpoint_selection"]
+                for layer in self.sae_cfg.layers:
+                    train_acts_raw = self.collect_activations(
+                        model, layer, "train", self.sae_cfg.max_activation_tokens
+                    )
+                    valid_acts_raw = self.collect_activations(
+                        model,
+                        layer,
+                        "valid",
+                        getattr(self.sae_cfg, "max_validation_activation_tokens", 16384),
+                    )
+                    stats = self.activation_stats(train_acts_raw)
+                    train_acts = self.normalize(train_acts_raw, stats)
+                    valid_acts = self.normalize(valid_acts_raw, stats)
+                    layer_res = []
+                    for dict_size in self.sae_cfg.dictionary_sizes:
+                        for k in self.sae_cfg.topk_values:
+                            for sae_seed in self.sae_cfg.seeds:
+                                layer_res.append(
+                                    self.train_one_sae(
+                                        train_acts,
+                                        valid_acts,
+                                        model_name,
+                                        model_seed,
+                                        layer,
+                                        dict_size,
+                                        k,
+                                        sae_seed,
+                                        stats,
+                                        checkpoint_selection,
+                                    )
+                                )
+                    sae_res[model_name][model_seed][layer] = layer_res
+                    serializable[model_name][str(model_seed)][str(layer)] = [
+                        {
+                            "meta": item["meta"],
+                            "metrics": item["metrics"],
+                            "normalization_summary": item["normalization_summary"],
+                            "checkpoint_path": item["checkpoint_path"],
+                        }
+                        for item in layer_res
+                    ]
+
+        save_json(serializable, Path(PATH.raw_metrics_dir) / "sae_res.json")
+        rows = self.flatten_rows(serializable)
+        summary_rows = self.summarize_rows(rows)
+        self.write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
+        self.write_csv(
+            summary_rows,
+            Path(PATH.table_dir) / "phase4a_sae_summary.csv",
+        )
+        save_json(
+            {
+                "phase": "4a",
+                "design": {
+                    "dictionary_size": self.sae_cfg.dictionary_sizes,
+                    "k": self.sae_cfg.topk_values,
+                    "layers": self.sae_cfg.layers,
+                    "sae_seeds": self.sae_cfg.seeds,
+                    "activation_site": self.sae_cfg.activation_site,
+                    "normalize_activations": getattr(self.sae_cfg, "normalize_activations", True),
+                    "dictionary_size_sensitivity": "deferred_to_phase4b",
+                    "sparsity_sensitivity": "deferred_to_phase4c",
+                },
+                "summary_rows": summary_rows,
+                "run_rows": rows,
+            },
+            Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
+        )
+        save_manifest(self.stage_manifest_path(), "sae", self.stage_config(), self.stage_outputs())
+        return sae_res

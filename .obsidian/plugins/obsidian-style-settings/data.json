@@ -1,0 +1,22 @@
+{
+  "Editor@@h1-accent-color@@dark": "#40AAB3",
+  "Appearance-dark@@theme-dark-style-select": "theme-dark-background-black",
+  "Appearance-dark@@card-layout-open-dark": true,
+  "Editor@@h1-color-select": "h1-color-designated",
+  "Editor@@h2-color-select": "h2-color-designated",
+  "Editor@@h3-color-select": "h3-color-designated",
+  "Editor@@h4-color-select": "h4-color-designated",
+  "Editor@@h5-color-select": "h5-color-designated",
+  "Editor@@h2-size": "1.35em",
+  "Editor@@h2-weight": 650,
+  "Editor@@h2-accent-color@@dark": "#BE9DD5",
+  "Editor@@inline-title-size": "1.6em",
+  "Editor@@inline-title-color-select": "inline-title-color-customized",
+  "Editor@@inline-title-color@@dark": "#D2D2D2",
+  "Editor@@h1-divider-on": true,
+  "Editor@@h3-size": "1.2em",
+  "Editor@@h3-accent-color@@dark": "#DF6060",
+  "Editor@@h4-size": "1.1em",
+  "Editor@@h4-accent-color@@dark": "#C5BC67",
+  "Editor@@bold-color@@dark": "#CCB62F"
+}

@@ -1,0 +1,220 @@
+{
+  "main": {
+    "id": "a6dbf06b0f4f9bc8",
+    "type": "split",
+    "children": [
+      {
+        "id": "9095799819d0be65",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "5ad8e0cf028e9d52",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Experiment Report.md",
+                "mode": "source",
+                "source": false,
+                "backlinks": false
+              },
+              "icon": "lucide-file",
+              "title": "Experiment Report"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "4195a7e7ed463434",
+    "type": "split",
+    "children": [
+      {
+        "id": "4b975f08ba0b8340",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "0ad012b9327d32fd",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "文件列表"
+            }
+          },
+          {
+            "id": "aa437990f2bdd41c",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "搜索"
+            }
+          },
+          {
+            "id": "0421630ba8e9ec55",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "书签"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "right": {
+    "id": "0a4ae25fefae3179",
+    "type": "split",
+    "children": [
+      {
+        "id": "d9030cb342b666cb",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "deaf96b27fd258b4",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Experiment Report.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Experiment Report 的反向链接列表"
+            }
+          },
+          {
+            "id": "2480974118eae2a1",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Experiment Report.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Experiment Report 的出链列表"
+            }
+          },
+          {
+            "id": "97bea5489f654c5c",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "标签"
+            }
+          },
+          {
+            "id": "9387f2635a1257d0",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "添加笔记属性"
+            }
+          },
+          {
+            "id": "fcd6801f584c683e",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Experiment Report.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Experiment Report 的大纲"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "media-extended:Open media": false,
+      "templater-obsidian:Templater": false,
+      "switcher:打开快速切换": false,
+      "graph:查看关系图谱": false,
+      "canvas:新建白板": false,
+      "daily-notes:打开/创建今天的日记": false,
+      "templates:插入模板": false,
+      "command-palette:打开命令面板": false,
+      "bases:新建数据库": false
+    }
+  },
+  "active": "5ad8e0cf028e9d52",
+  "lastOpenFiles": [
+    "MyResearch",
+    "README.md",
+    "Research Report.md",
+    "Experiment Report.md",
+    "output/tmp_phase6_record_check/reports",
+    "output/tmp_phase6_record_check/tables",
+    "output/tmp_phase6_record_check/raw_metrics",
+    "output/tmp_phase6_record_check/figures",
+    "output/tmp_phase6_record_check",
+    "output/tmp_interpret_resume_check/tables/phase6_interpretation_scores.csv",
+    "output/tmp_interpret_resume_check/raw_metrics",
+    "output/tmp_interpret_resume_check/reports",
+    "output/tmp_interpret_resume_check/tables",
+    "output/tmp_interpret_resume_check/figures",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_loss_all_seeds.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_layer0_toeplitz_deviation_by_head.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_layer0_distance_by_head.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_layer0_entropy_by_head.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_layer0_head0_singular_values.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_layer0_head0_attention_heatmap.png",
+    "output/tmp_scheduler_shard_check/train_shards/std_seed42/figures/std_seed42_loss.png",
+    "output/tmp_resume_skip_check/figures/std_loss_all_seeds.png",
+    "output/tmp_resume_skip_check/figures/std_seed42_layer0_toeplitz_deviation_by_head.png",
+    "output/tmp_resume_skip_check/figures/std_seed42_layer0_distance_by_head.png",
+    "output/final_pipeline_check/reports/phase6_feature_cases.md",
+    "output/phase6_check/reports/phase6_feature_cases.md",
+    "代码结构设计.md"
+  ]
+}
