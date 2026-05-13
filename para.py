@@ -37,6 +37,8 @@ DATA = SimpleNamespace(
     dataset_config=None,
     text_key="text",
     tokenizer="gpt2",
+    hf_cache_dir=os.getenv("HF_HOME"),
+    local_files_only=os.getenv("HF_HUB_OFFLINE", "0") == "1",
     seq_len=1024,
     train_blocks=1500,
     valid_blocks=300,

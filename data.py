@@ -2,10 +2,13 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer
 
 from para import PATH, SECRETS
 from utils import ensure_dir
+
+# Import transformers after para.py loads .env, so HF_HOME/HF_* cache variables
+# from .env are visible before HuggingFace libraries resolve their cache paths.
+from transformers import AutoTokenizer
 
 
 TINY_TEXTS = [
@@ -57,9 +60,21 @@ class GenerateData:
     def hf_token(self):
         return getattr(SECRETS, "hf_token", None)
 
+    @property
+    def hf_cache_dir(self):
+        return getattr(self.data_cfg, "hf_cache_dir", None)
+
+    @property
+    def local_files_only(self):
+        return bool(getattr(self.data_cfg, "local_files_only", False))
+
     def load_tokenizer(self):
         try:
-            kwargs = {"local_files_only": True} if self.data_cfg.dataset == "tiny" else {}
+            kwargs = {}
+            if self.hf_cache_dir:
+                kwargs["cache_dir"] = self.hf_cache_dir
+            if self.local_files_only or self.data_cfg.dataset == "tiny":
+                kwargs["local_files_only"] = True
             if self.hf_token and self.data_cfg.dataset != "tiny":
                 kwargs["token"] = self.hf_token
             tokenizer = AutoTokenizer.from_pretrained(self.data_cfg.tokenizer, **kwargs)
@@ -80,6 +95,8 @@ class GenerateData:
             from datasets import load_dataset
 
             kwargs = {"split": "train", "streaming": self.data_cfg.streaming}
+            if self.hf_cache_dir:
+                kwargs["cache_dir"] = self.hf_cache_dir
             if self.hf_token:
                 kwargs["token"] = self.hf_token
             if self.data_cfg.dataset_config:
