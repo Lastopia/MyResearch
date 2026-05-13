@@ -49,8 +49,9 @@ class GenerateData:
         self.data_cfg = data_cfg
         self.configure_hf_cache()
         dataset_cache_name = data_cfg.dataset.replace("/", "__")
+        tokenizer_cache_name = str(data_cfg.tokenizer).replace("/", "__").replace("\\", "__")
         self.cache_path = Path(PATH.cache_dir) / "tokens" / (
-            f"{dataset_cache_name}_{data_cfg.tokenizer}_seq{data_cfg.seq_len}_"
+            f"{dataset_cache_name}_{tokenizer_cache_name}_seq{data_cfg.seq_len}_"
             f"tr{data_cfg.train_blocks}_va{data_cfg.valid_blocks}.pt"
         )
 
@@ -66,17 +67,23 @@ class GenerateData:
     def local_files_only(self):
         return bool(getattr(self.data_cfg, "local_files_only", False))
 
+    @property
+    def hf_cache_root(self):
+        return Path(self.hf_cache_dir or Path(PATH.cache_dir) / "dataset").resolve()
+
+    def cached_tokenizer_dir(self):
+        name = str(self.data_cfg.tokenizer).replace("/", "__").replace("\\", "__")
+        return self.hf_cache_root / "tokenizers" / name
+
     def configure_hf_cache(self):
         if self.data_cfg.dataset == "tiny":
             return
-        cache_dir = getattr(self.data_cfg, "hf_cache_dir", None)
-        if not cache_dir:
-            return
-        root = Path(cache_dir).resolve()
+        root = Path(getattr(self.data_cfg, "hf_cache_dir", None) or Path(PATH.cache_dir) / "dataset").resolve()
         ensure_dir(root)
         ensure_dir(root / "hub")
         ensure_dir(root / "xet")
         ensure_dir(root / "datasets")
+        ensure_dir(root / "tokenizers")
         self._hf_cache_dir = str(root)
         os.environ["HF_HOME"] = str(root)
         os.environ["HF_HUB_CACHE"] = str(root / "hub")
@@ -91,6 +98,7 @@ class GenerateData:
         try:
             from transformers import AutoTokenizer
 
+            local_dir = self.cached_tokenizer_dir()
             kwargs = {}
             if self.hf_cache_dir:
                 kwargs["cache_dir"] = self.hf_cache_dir
@@ -98,7 +106,17 @@ class GenerateData:
                 kwargs["local_files_only"] = True
             if self.hf_token and self.data_cfg.dataset != "tiny":
                 kwargs["token"] = self.hf_token
-            tokenizer = AutoTokenizer.from_pretrained(self.data_cfg.tokenizer, **kwargs)
+            if local_dir.exists():
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
+                except Exception:
+                    tokenizer = AutoTokenizer.from_pretrained(self.data_cfg.tokenizer, **kwargs)
+                    ensure_dir(local_dir)
+                    tokenizer.save_pretrained(local_dir)
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(self.data_cfg.tokenizer, **kwargs)
+                ensure_dir(local_dir)
+                tokenizer.save_pretrained(local_dir)
         except Exception:
             if self.data_cfg.dataset != "tiny":
                 raise

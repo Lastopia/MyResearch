@@ -39,6 +39,14 @@ cache/dataset/
 
 代码会把 HuggingFace 的 `HF_HOME`、`HF_HUB_CACHE`、`HF_XET_CACHE` 和 `HF_DATASETS_CACHE` 指向这个目录。有网运行时会优先读取已有缓存，缺少的文件会自动下载补齐。
 
+Tokenizer 会额外保存到稳定目录：
+
+```text
+cache/dataset/tokenizers/gpt2/
+```
+
+后续运行会先检查这个目录；如果完整就直接读取，如果不存在或不完整，就重新从 HuggingFace 下载并保存。
+
 ## 2. 配置入口
 
 主要配置都在 [para.py](./para.py)。
