@@ -31,6 +31,14 @@ OPENAI_API_KEY=sk_your_key
 - `OPENAI_API_KEY` 只在 `INTERP.dry_run = False` 时需要。
 - `.env` 已被 `.gitignore` 忽略，不应上传。
 
+默认数据缓存位置是：
+
+```text
+cache/dataset/
+```
+
+代码会把 HuggingFace 的 `HF_HOME`、`HF_HUB_CACHE`、`HF_XET_CACHE` 和 `HF_DATASETS_CACHE` 指向这个目录。有网运行时会优先读取已有缓存，缺少的文件会自动下载补齐。
+
 ## 2. 配置入口
 
 主要配置都在 [para.py](./para.py)。
@@ -81,6 +89,8 @@ SMOKE_TEST = False
 ```bash
 python main.py
 ```
+
+第一次运行会下载 GPT-2 tokenizer 和 OpenWebText 需要的文件到 `cache/dataset/`。如果下载中断，重新运行即可继续复用已下载部分。
 
 默认阶段顺序：
 

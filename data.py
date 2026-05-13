@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import torch
@@ -5,10 +6,6 @@ from torch.utils.data import Dataset
 
 from para import PATH, SECRETS
 from utils import ensure_dir
-
-# Import transformers after para.py loads .env, so HF_HOME/HF_* cache variables
-# from .env are visible before HuggingFace libraries resolve their cache paths.
-from transformers import AutoTokenizer
 
 
 TINY_TEXTS = [
@@ -50,6 +47,7 @@ class BlockDataset(Dataset):
 class GenerateData:
     def __init__(self, data_cfg):
         self.data_cfg = data_cfg
+        self.configure_hf_cache()
         dataset_cache_name = data_cfg.dataset.replace("/", "__")
         self.cache_path = Path(PATH.cache_dir) / "tokens" / (
             f"{dataset_cache_name}_{data_cfg.tokenizer}_seq{data_cfg.seq_len}_"
@@ -62,14 +60,37 @@ class GenerateData:
 
     @property
     def hf_cache_dir(self):
-        return getattr(self.data_cfg, "hf_cache_dir", None)
+        return getattr(self, "_hf_cache_dir", getattr(self.data_cfg, "hf_cache_dir", None))
 
     @property
     def local_files_only(self):
         return bool(getattr(self.data_cfg, "local_files_only", False))
 
+    def configure_hf_cache(self):
+        if self.data_cfg.dataset == "tiny":
+            return
+        cache_dir = getattr(self.data_cfg, "hf_cache_dir", None)
+        if not cache_dir:
+            return
+        root = Path(cache_dir).resolve()
+        ensure_dir(root)
+        ensure_dir(root / "hub")
+        ensure_dir(root / "xet")
+        ensure_dir(root / "datasets")
+        self._hf_cache_dir = str(root)
+        os.environ["HF_HOME"] = str(root)
+        os.environ["HF_HUB_CACHE"] = str(root / "hub")
+        os.environ["HF_XET_CACHE"] = str(root / "xet")
+        os.environ["HF_DATASETS_CACHE"] = str(root / "datasets")
+        if not self.local_files_only:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("HF_DATASETS_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+
     def load_tokenizer(self):
         try:
+            from transformers import AutoTokenizer
+
             kwargs = {}
             if self.hf_cache_dir:
                 kwargs["cache_dir"] = self.hf_cache_dir

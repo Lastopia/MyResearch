@@ -32,13 +32,14 @@ SECRETS = SimpleNamespace(
 )
 
 DATA = SimpleNamespace(
-    # "openwebtext" is the GPT-2-like default. Use "tiny" for an offline smoke test.
+    # Online local-cache mode: HuggingFace reuses ./cache/dataset and downloads
+    # only missing files. Use "tiny" for an offline smoke test.
     dataset="Skylion007/openwebtext",
     dataset_config=None,
     text_key="text",
     tokenizer="gpt2",
-    hf_cache_dir=os.getenv("HF_HOME"),
-    local_files_only=os.getenv("HF_HUB_OFFLINE", "0") == "1",
+    hf_cache_dir="./cache/dataset",
+    local_files_only=False,
     seq_len=1024,
     train_blocks=1500,
     valid_blocks=300,
