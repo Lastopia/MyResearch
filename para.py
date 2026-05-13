@@ -42,7 +42,7 @@ DATA = SimpleNamespace(
     seq_len=1024,
     train_blocks=1500,
     valid_blocks=300,
-    streaming=True,
+    streaming=False,
     use_cache=True,
     seed=42,
 )
