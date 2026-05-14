@@ -31,7 +31,7 @@ RUN_TRAIN = True
 RUN_SAE = True
 RUN_EVAL = True
 RUN_INTERPRET = True
-EXPERIMENT_NAME = "rope_vs_pope_openwebtext_gpt2small"
+EXPERIMENT_NAME = "v0.2"
 
 # Optional training scheduler. It shards TRAIN by model_name x seed and launches
 # one shard per selected GPU. Leave disabled for a single H100 or simple runs.
@@ -342,7 +342,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    print("这是版本0.1哦！")
+    print("这是版本0.2哦！")
     args = parse_args()
     if args.train_shard:
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)
