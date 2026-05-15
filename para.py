@@ -72,9 +72,9 @@ TRAIN = SimpleNamespace(
     # Phase 2 training settings plus Phase 3 attention-analysis limits.
     # representative_* keeps Phase 3 affordable on two A100s.
     seeds=[41, 42, 43],
-    steps=3000,
+    steps=4000,
     batch_size=8,
-    lr=3e-5,
+    lr=1e-5,
     weight_decay=0.1,
     warmup_steps=1000,
     grad_clip=1.0,
