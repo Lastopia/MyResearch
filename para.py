@@ -72,7 +72,7 @@ TRAIN = SimpleNamespace(
     # Phase 2 training settings plus Phase 3 attention-analysis limits.
     # representative_* keeps Phase 3 affordable on two A100s.
     seeds=[41, 42, 43],
-    steps=1000,
+    steps=4000,
     batch_size=8,
     lr=1e-4,
     weight_decay=0.1,
@@ -81,8 +81,8 @@ TRAIN = SimpleNamespace(
     precision="bf16",
     device="cuda",
     log_interval=50,
-    eval_interval=200,
-    save_interval=500,
+    eval_interval=500,
+    save_interval=2000,
     analysis_batches=1,
     loss_spike_threshold=0.5,
     loss_threshold=None,

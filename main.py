@@ -28,9 +28,9 @@ from utils import (
 RUN_DATA = True
 RUN_MODEL = True
 RUN_TRAIN = True
-RUN_SAE = True
-RUN_EVAL = True
-RUN_INTERPRET = True
+RUN_SAE = False
+RUN_EVAL = False
+RUN_INTERPRET = False
 EXPERIMENT_NAME = "v0.2"
 
 # Optional training scheduler. It shards TRAIN by model_name x seed and launches
@@ -342,7 +342,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    print("这是版本0.2哦！")
+    print("这是版本0.3哦！")
     args = parse_args()
     if args.train_shard:
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)
