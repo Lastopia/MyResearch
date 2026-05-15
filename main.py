@@ -342,7 +342,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    print("这是版本0.4哦！")
+    print("这是版本0.5哦！")
     args = parse_args()
     if args.train_shard:
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)
