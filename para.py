@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 
-REMARK = "这是版本0.7哦，重新回调学习率看看行不行"
+REMARK = "这是版本0.8哦，eval也得调高"
 
 try:
     from dotenv import load_dotenv
@@ -83,7 +83,7 @@ TRAIN = SimpleNamespace(
     precision="bf16",
     device="cuda",
     log_interval=100,
-    eval_interval=500,
+    eval_interval=2000,
     save_interval=2000,
     analysis_batches=1,
     loss_spike_threshold=0.5,
