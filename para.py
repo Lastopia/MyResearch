@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 
-REMARK = "这是版本0.8哦，eval也得调高"
+REMARK = "这是版本0.8哦，先只跑一个seed吧"
 
 try:
     from dotenv import load_dotenv
@@ -73,7 +73,7 @@ MODEL = SimpleNamespace(
 TRAIN = SimpleNamespace(
     # Phase 2 training settings plus Phase 3 attention-analysis limits.
     # representative_* keeps Phase 3 affordable on two A100s.
-    seeds=[41, 42, 43],
+    seeds=[42],
     steps=8000,
     batch_size=12,
     lr=5e-5,
