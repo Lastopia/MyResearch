@@ -6,7 +6,7 @@ git fetch --all && git reset --hard origin/main && git clean -fd
 export HF_ENDPOINT=https://hf-mirror.com
 ```
 ```bash
-rm -f *_step1000.pt *_step2000.pt *_step3000.pt *_step4000.pt
+rm -f *_step4000.pt *_step8000.pt *_step6000.pt *_step10000.pt
 ```
 ```bash
 python main.py --use-train-scheduler --train-gpus 0,1
