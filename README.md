@@ -1,3 +1,17 @@
+# 常用指令大全
+```bash
+git fetch --all && git reset --hard origin/main && git clean -fd
+```
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+```
+```bash
+rm -f *_step1000.pt *_step2000.pt *_step3000.pt *_step4000.pt
+```
+```bash
+python main.py --use-train-scheduler --train-gpus 0,1
+```
+
 # RoPE / PoPE SAE Research
 
 本项目用于比较不同 positional encoding 对语言模型训练、attention 机制、SAE 分解、disentanglement 和 LLM-assisted interpretability 的影响。
