@@ -9,7 +9,7 @@ from data import GenerateData
 from eval import Evaluate
 from interpret import InterpretSAE
 from model import SelfTransformer
-from para import DATA, EVAL, INTERP, MODEL, PATH, SAE, SECRETS, SMOKE_TEST, TRAIN
+from para import DATA, EVAL, INTERP, MODEL, PATH, SAE, SECRETS, SMOKE_TEST, TRAIN, REMARK
 from sae import SelfSAE
 from train import Train
 from utils import (
@@ -342,8 +342,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    print("这是版本0.6哦！")
-    print("感觉学习率还是太高了")
+    print(REMARK)
     args = parse_args()
     if args.train_shard:
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)

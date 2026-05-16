@@ -1,6 +1,8 @@
 import os
 from types import SimpleNamespace
 
+REMARK = "这是版本0.7哦，重新回调学习率看看行不行"
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -72,9 +74,9 @@ TRAIN = SimpleNamespace(
     # Phase 2 training settings plus Phase 3 attention-analysis limits.
     # representative_* keeps Phase 3 affordable on two A100s.
     seeds=[41, 42, 43],
-    steps=5000,
+    steps=8000,
     batch_size=8,
-    lr=1e-5,
+    lr=5e-5,
     weight_decay=0.1,
     warmup_steps=1000,
     grad_clip=1.0,
