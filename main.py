@@ -28,9 +28,9 @@ from utils import (
 RUN_DATA = True
 RUN_MODEL = True
 RUN_TRAIN = True
-RUN_SAE = False
-RUN_EVAL = False
-RUN_INTERPRET = False
+RUN_SAE = True
+RUN_EVAL = True
+RUN_INTERPRET = True
 EXPERIMENT_NAME = "v0.2"
 
 # Optional training scheduler. It shards TRAIN by model_name x seed and launches
