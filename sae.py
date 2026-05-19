@@ -164,7 +164,8 @@ class SelfSAE:
         probs = frequencies / frequencies.sum().clamp_min(1e-9)
         entropy = -(probs * probs.clamp_min(1e-9).log()).sum().item()
         max_entropy = math.log(max(feature_acts.size(-1), 2))
-        quantiles = torch.quantile(frequencies.float(), torch.tensor([0.5, 0.9, 0.99]))
+        q = torch.tensor([0.5, 0.9, 0.99], device=frequencies.device)
+        quantiles = torch.quantile(frequencies.float(), q)
         return {
             "l0": compute_l0(feature_acts).item(),
             "average_active_features_per_token": active.float().sum(dim=-1).mean().item(),
