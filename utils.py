@@ -1,3 +1,4 @@
+import csv
 import json
 import hashlib
 import math
@@ -39,6 +40,21 @@ def save_json(obj, path: str | os.PathLike) -> None:
 def load_json(path: str | os.PathLike):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def write_csv(rows, path: str | os.PathLike) -> None:
+    ensure_dir(Path(path).parent)
+    if not rows:
+        return
+    fieldnames = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def stable_hash(obj) -> str:
@@ -140,3 +156,12 @@ def get_device(requested: str) -> torch.device:
 
 def perplexity(loss: float) -> float:
     return float(math.exp(min(loss, 20.0)))
+
+
+def mean_std(values) -> dict:
+    clean = [value for value in values if value is not None and math.isfinite(value)]
+    if not clean:
+        return {"mean": None, "std": None}
+    mean = sum(clean) / len(clean)
+    var = sum((value - mean) ** 2 for value in clean) / len(clean)
+    return {"mean": mean, "std": math.sqrt(var)}

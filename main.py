@@ -8,6 +8,7 @@ import time
 from data import GenerateData
 from eval import Evaluate
 from interpret import InterpretSAE
+from logger import ExperimentLogger
 from model import SelfTransformer
 from para import DATA, EVAL, INTERP, MODEL, PATH, SAE, SECRETS, SMOKE_TEST, TRAIN, REMARK
 from sae import SelfSAE
@@ -45,7 +46,6 @@ if SMOKE_TEST:
     RUN_INTERPRET = False
     EXPERIMENT_NAME = "smoke_test"
 
-
 def prepare_dirs():
     ensure_dirs(
         [
@@ -62,7 +62,6 @@ def prepare_dirs():
             PATH.raw_metrics_dir,
         ]
     )
-
 
 def experiment_config():
     return {
@@ -91,7 +90,6 @@ def experiment_config():
         },
     }
 
-
 def experiment_manifest():
     # This manifest is the reproducibility record for a run. Stage-level
     # manifests use smaller config snapshots to decide whether cached outputs
@@ -109,7 +107,6 @@ def experiment_manifest():
         "environment": runtime_environment_info(),
     }
 
-
 def set_shard_output_dirs(shard_root):
     # Shards share DATA/MODEL/TRAIN config, but write metrics/logs into isolated
     # folders so parallel runs do not overwrite each other.
@@ -119,7 +116,6 @@ def set_shard_output_dirs(shard_root):
     PATH.log_dir = str(shard_root / "logs")
     PATH.report_dir = str(shard_root / "reports")
     PATH.raw_metrics_dir = str(shard_root / "raw_metrics")
-
 
 def run_train_shard(model_name, seed, device, shard_root):
     MODEL.model_names = [model_name]
@@ -132,7 +128,6 @@ def run_train_shard(model_name, seed, device, shard_root):
     data_res = GenerateData(DATA).run()
     model_res = SelfTransformer(MODEL).run()
     Train(TRAIN, model_res, data_res).run()
-
 
 def train_shard_commands():
     shard_root = Path(PATH.output_dir) / "train_shards"
@@ -161,7 +156,6 @@ def train_shard_commands():
                 }
             )
     return commands
-
 
 def launch_train_scheduler():
     gpu_ids = TRAIN_SCHEDULER_GPU_IDS or ["0"]
@@ -196,7 +190,6 @@ def launch_train_scheduler():
         if queue or running:
             time.sleep(5)
     return completed
-
 
 def aggregate_train_shards(model_res, data_res, shard_items):
     # After scheduled training, merge per-shard train_res.json files back into
@@ -243,7 +236,6 @@ def aggregate_train_shards(model_res, data_res, shard_items):
     save_manifest(train_runner.stage_manifest_path(), "train", train_runner.stage_config(), train_runner.stage_outputs())
     return train_res
 
-
 def scheduled_train(model_res, data_res):
     train_runner = Train(TRAIN, model_res, data_res)
     if manifest_is_current(train_runner.stage_manifest_path(), train_runner.stage_config(), train_runner.stage_outputs()):
@@ -253,66 +245,149 @@ def scheduled_train(model_res, data_res):
     shard_items = launch_train_scheduler()
     return aggregate_train_shards(model_res, data_res, shard_items)
 
+def log_result(logger, stage_name, result):
+    if result is None:
+        logger.log_stage_end(f"{stage_name}: no result")
+    elif isinstance(result, dict):
+        logger.log_stage_end(f"{stage_name}: result keys={list(result.keys())}")
+    else:
+        logger.log_stage_end(f"{stage_name}: result type={type(result).__name__}")
 
-def load_or_run_data():
-    return GenerateData(DATA).run()
+
+def save_experiment_metadata(logger):
+    logger.log_stage_start("Manifest stage: writing experiment_config and experiment_manifest")
+    save_json(experiment_config(), Path(PATH.raw_metrics_dir) / "experiment_config.json")
+    save_json(experiment_manifest(), Path(PATH.raw_metrics_dir) / "experiment_manifest.json")
+    logger.log_stage_end("Manifest stage")
 
 
-def load_or_run_model():
-    return SelfTransformer(MODEL).run()
+def stage_needs(*flags):
+    return any(flags)
 
 
-def load_or_run_train(model_res, data_res):
+def load_or_run_data(logger):
+    logger.log_stage_start(
+        f"Data stage: dataset={DATA.dataset} tokenizer={DATA.tokenizer} "
+        f"seq_len={DATA.seq_len} train_blocks={DATA.train_blocks} valid_blocks={DATA.valid_blocks}"
+    )
+    result = GenerateData(DATA).run()
+    meta = result.get("meta", {})
+    logger.log_stage_end(
+        f"Data stage: train_blocks={meta.get('num_train_blocks')} "
+        f"valid_blocks={meta.get('num_valid_blocks')} vocab_size={meta.get('vocab_size')}"
+    )
+    return result
+
+def load_or_run_model(logger):
+    logger.log_stage_start(
+        f"Model stage: models={list(MODEL.model_names)} layers={MODEL.n_layers} "
+        f"d_model={MODEL.d_model} heads={MODEL.n_heads} seq_len={MODEL.seq_len}"
+    )
+    result = SelfTransformer(MODEL).run()
+    logger.log_stage_end(
+        f"Model stage: built={list(result.get('models', {}).keys())} "
+        f"checks={list(result.get('checks', {}).keys())}"
+    )
+    return result
+
+def load_or_run_train(model_res, data_res, logger):
     train_runner = Train(TRAIN, model_res, data_res)
     if RUN_TRAIN and USE_TRAIN_SCHEDULER:
-        return scheduled_train(model_res, data_res)
+        logger.log_stage_start(
+            f"Train stage: scheduled run on GPUs={TRAIN_SCHEDULER_GPU_IDS} "
+            f"models={list(MODEL.model_names)} seeds={list(TRAIN.seeds)} steps={TRAIN.steps}"
+        )
+        result = scheduled_train(model_res, data_res)
+        log_result(logger, "Train stage scheduled", result)
+        return result
     if RUN_TRAIN:
-        return train_runner.run()
+        logger.log_stage_start(
+            f"Train stage: run models={list(MODEL.model_names)} seeds={list(TRAIN.seeds)} "
+            f"steps={TRAIN.steps} batch={TRAIN.batch_size} device={TRAIN.device}"
+        )
+        result = train_runner.run()
+        log_result(logger, "Train stage", result)
+        return result
+    logger.log_stage_start("Train stage: RUN_TRAIN=False, loading existing train results")
     loaded = train_runner.load_completed_train_res()
     if loaded is None:
         raise RuntimeError("RUN_TRAIN is False, but existing train_res/checkpoints could not be loaded.")
+    log_result(logger, "Train stage loaded", loaded)
     return loaded
 
-
-def load_or_run_sae(train_res, data_res):
+def load_or_run_sae(train_res, data_res, logger):
     sae_runner = SelfSAE(SAE, train_res, data_res)
     if RUN_SAE:
-        return sae_runner.run()
+        logger.log_stage_start(
+            f"SAE stage: run layers={list(SAE.layers)} dict_sizes={list(SAE.dictionary_sizes)} "
+            f"k={list(SAE.topk_values)} seeds={list(SAE.seeds)} steps={SAE.steps}"
+        )
+        result = sae_runner.run()
+        log_result(logger, "SAE stage", result)
+        return result
+    logger.log_stage_start("SAE stage: RUN_SAE=False, loading existing SAE results")
     loaded = sae_runner.load_completed_sae_res()
     if loaded is None:
         raise RuntimeError("RUN_SAE is False, but existing sae_res/checkpoints could not be loaded.")
+    log_result(logger, "SAE stage loaded", loaded)
     return loaded
 
-
-def load_or_run_eval(train_res, sae_res, data_res):
+def load_or_run_eval(train_res, sae_res, data_res, logger):
     eval_path = Path(PATH.raw_metrics_dir) / "eval_res.json"
     if RUN_EVAL:
-        return Evaluate(EVAL, train_res, sae_res, data_res).run()
+        logger.log_stage_start(
+            f"Eval stage: run layers={list(EVAL.layers)} probe_steps={EVAL.probe_steps} "
+            f"probe_train_tokens={EVAL.max_probe_train_tokens}"
+        )
+        result = Evaluate(EVAL, train_res, sae_res, data_res).run()
+        log_result(logger, "Eval stage", result)
+        return result
+    logger.log_stage_start("Eval stage: RUN_EVAL=False, trying to load existing eval results")
     if eval_path.exists():
-        return load_json(eval_path)
+        result = load_json(eval_path)
+        log_result(logger, "Eval stage loaded eval_res", result)
+        return result
     phase5_path = Path(PATH.raw_metrics_dir) / "phase5_summary.json"
     if phase5_path.exists():
-        return load_json(phase5_path)
+        result = load_json(phase5_path)
+        log_result(logger, "Eval stage loaded phase5_summary", result)
+        return result
+    logger.log_stage_end("Eval stage: no existing eval output found")
     return None
-
 
 def run():
     # The main pipeline intentionally passes only config objects and prior stage
     # result dictionaries. Paths are imported by each stage from para.py.
     prepare_dirs()
-    save_json(experiment_config(), Path(PATH.raw_metrics_dir) / "experiment_config.json")
-    save_json(experiment_manifest(), Path(PATH.raw_metrics_dir) / "experiment_manifest.json")
-
-    data_res = load_or_run_data() if (RUN_DATA or RUN_TRAIN or RUN_SAE or RUN_EVAL or RUN_INTERPRET) else None
-    model_res = load_or_run_model() if (RUN_MODEL or RUN_TRAIN or RUN_SAE or RUN_EVAL or RUN_INTERPRET) else None
-    train_res = load_or_run_train(model_res, data_res) if (RUN_TRAIN or RUN_SAE or RUN_EVAL or RUN_INTERPRET) else None
-    sae_res = load_or_run_sae(train_res, data_res) if (RUN_SAE or RUN_EVAL or RUN_INTERPRET) else None
-    eval_res = load_or_run_eval(train_res, sae_res, data_res) if (RUN_EVAL or RUN_INTERPRET) else None
-    interp_res = (
-        InterpretSAE(INTERP, train_res, sae_res, data_res, eval_res).run()
-        if RUN_INTERPRET
-        else None
+    logger = ExperimentLogger()
+    logger.log_stage_start(
+        f"Main pipeline: experiment={EXPERIMENT_NAME} "
+        f"flags=data:{RUN_DATA} model:{RUN_MODEL} train:{RUN_TRAIN} "
+        f"sae:{RUN_SAE} eval:{RUN_EVAL} interpret:{RUN_INTERPRET}"
     )
+    save_experiment_metadata(logger)
+
+    needs_data = stage_needs(RUN_DATA, RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
+    needs_model = stage_needs(RUN_MODEL, RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
+    needs_train = stage_needs(RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
+    needs_sae = stage_needs(RUN_SAE, RUN_EVAL, RUN_INTERPRET)
+    needs_eval = stage_needs(RUN_EVAL, RUN_INTERPRET)
+
+    data_res = load_or_run_data(logger) if needs_data else None
+    model_res = load_or_run_model(logger) if needs_model else None
+    train_res = load_or_run_train(model_res, data_res, logger) if needs_train else None
+    sae_res = load_or_run_sae(train_res, data_res, logger) if needs_sae else None
+    eval_res = load_or_run_eval(train_res, sae_res, data_res, logger) if needs_eval else None
+    if RUN_INTERPRET:
+        logger.log_stage_start(
+            f"Interpret stage: provider={INTERP.provider} model={INTERP.model} "
+            f"dry_run={INTERP.dry_run} layers={list(INTERP.layers)}"
+        )
+        interp_res = InterpretSAE(INTERP, train_res, sae_res, data_res, eval_res).run()
+        log_result(logger, "Interpret stage", interp_res)
+    else:
+        interp_res = None
+        logger.log_stage_end("Interpret stage: skipped")
 
     main_res = {
         "data_meta": data_res["meta"] if data_res else None,
@@ -324,9 +399,11 @@ def run():
         "eval_res": eval_res,
         "interp_res": interp_res,
     }
+    logger.log_stage_start("Main result stage: writing main_res.json")
     save_json(main_res, Path(PATH.raw_metrics_dir) / "main_res.json")
+    logger.log_stage_end("Main result stage")
+    logger.log_stage_end("Main pipeline")
     return main_res
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -339,7 +416,6 @@ def parse_args():
     parser.add_argument("--train-gpus")
     parser.add_argument("--train-max-parallel", type=int)
     return parser.parse_args()
-
 
 if __name__ == "__main__":
     print(REMARK)

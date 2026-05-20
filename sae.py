@@ -1,4 +1,3 @@
-import csv
 import math
 import time
 from pathlib import Path
@@ -7,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from logger import ExperimentLogger
 from metrics import compute_dead_feature_rate, compute_l0
 from para import PATH
 from utils import (
@@ -14,9 +14,11 @@ from utils import (
     get_device,
     load_json,
     manifest_is_current,
+    mean_std,
     save_json,
     save_manifest,
     set_seed,
+    write_csv,
 )
 from visualize import plot_sae_health_curves, plot_sae_training_curves
 
@@ -43,12 +45,39 @@ class TopKSAE(nn.Module):
         return recon, acts
 
 
+def load_sae_item(sae_item, device):
+    """Load an SAE checkpoint only when a downstream stage actually needs it."""
+    if "sae" in sae_item and "normalization" in sae_item:
+        sae_item["sae"] = sae_item["sae"].to(device)
+        return sae_item
+
+    ckpt_path = sae_item.get("checkpoint_path")
+    if not ckpt_path or not Path(ckpt_path).exists():
+        raise FileNotFoundError(f"Missing SAE checkpoint: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    meta = sae_item["meta"]
+    normalization = ckpt["normalization"]
+    sae = TopKSAE(
+        normalization["mean"].size(-1),
+        meta["dict_size"],
+        meta["k"],
+    ).to(device)
+    sae.load_state_dict(ckpt["sae"])
+    return {
+        **sae_item,
+        "sae": sae,
+        "normalization": normalization,
+        "metrics": sae_item.get("metrics", ckpt.get("metrics", {})),
+    }
+
+
 class SelfSAE:
     def __init__(self, sae_cfg, train_res, data_res):
         self.sae_cfg = sae_cfg
         self.train_res = train_res
         self.data_res = data_res
         self.device = get_device(getattr(sae_cfg, "device", "cuda"))
+        self.logger = ExperimentLogger()
 
     def loader(self, split):
         return torch.utils.data.DataLoader(
@@ -81,6 +110,7 @@ class SelfSAE:
         return Path(PATH.raw_metrics_dir) / "sae_manifest.json"
 
     def load_completed_sae_res(self):
+        self.logger.log_stage_start("load completed SAE results")
         serializable_path = Path(PATH.raw_metrics_dir) / "sae_res.json"
         if not serializable_path.exists():
             return None
@@ -99,32 +129,26 @@ class SelfSAE:
                         if not ckpt_path or not Path(ckpt_path).exists():
                             return None
                         meta = item["meta"]
-                        ckpt = torch.load(ckpt_path, map_location=self.device)
-                        sae = TopKSAE(
-                            ckpt["normalization"]["mean"].size(-1),
-                            meta["dict_size"],
-                            meta["k"],
-                        ).to(self.device)
-                        sae.load_state_dict(ckpt["sae"])
                         layer_res.append(
                             {
-                                "sae": sae,
                                 "meta": meta,
                                 "metrics": item["metrics"],
                                 "normalization_summary": item["normalization_summary"],
-                                "normalization": ckpt["normalization"],
                                 "checkpoint_path": ckpt_path,
                             }
                         )
                     sae_res[model_name][model_seed][layer] = layer_res
+        self.logger.log_stage_end("load completed SAE results metadata only")
         return sae_res
 
     @torch.no_grad()
-    def collect_activations(self, model, layer, split, max_tokens):
+    def collect_activations(self, model, layer, split, max_tokens, model_name=None, model_seed=None):
         model.eval()
         acts = []
         seen = 0
-        for x, _ in self.loader(split):
+        label = f"{model_name or 'model'} seed {model_seed} layer {layer} {split}"
+        self.logger.log_stage_start(f"collect SAE activations {label} target_tokens={max_tokens}")
+        for batch_idx, (x, _) in enumerate(self.loader(split), start=1):
             x = x.to(self.device)
             out = model(x, capture_layers=[layer])
             if layer not in out["activations"]:
@@ -134,10 +158,16 @@ class SelfSAE:
             if take > 0:
                 acts.append(flat[:take])
                 seen += take
+            if batch_idx == 1 or seen >= max_tokens or batch_idx % 10 == 0:
+                self.logger.write(
+                    f"[progress] collect SAE activations {label}: "
+                    f"tokens={seen}/{max_tokens} batches={batch_idx}"
+                )
             if seen >= max_tokens:
                 break
         if not acts:
             raise RuntimeError(f"No activations collected for split={split}, layer={layer}")
+        self.logger.log_stage_end(f"collect SAE activations {label} tokens={seen}")
         return torch.cat(acts, dim=0)
 
     def activation_stats(self, activations):
@@ -219,6 +249,14 @@ class SelfSAE:
         valid_data = valid_acts.to(self.device)
         history = []
         start_time = time.perf_counter()
+        run_name = (
+            f"SAE {model_name} modelseed {model_seed} layer {layer} "
+            f"dict {dict_size} k {k} saeseed {sae_seed}"
+        )
+        self.logger.log_stage_start(
+            f"{run_name} train_tokens={train_data.size(0)} valid_tokens={valid_data.size(0)} "
+            f"steps={self.sae_cfg.steps} batch={self.sae_cfg.batch_size}"
+        )
 
         for step in range(1, self.sae_cfg.steps + 1):
             sae.train()
@@ -231,18 +269,31 @@ class SelfSAE:
             opt.step()
 
             should_log = step == 1 or step == self.sae_cfg.steps or step % self.sae_cfg.eval_interval == 0
+            should_progress = step % max(1, getattr(self.sae_cfg, "log_interval", 100)) == 0
+            if should_progress and not should_log:
+                elapsed = time.perf_counter() - start_time
+                self.logger.write(
+                    f"[progress] {run_name} step={step}/{self.sae_cfg.steps} "
+                    f"loss={loss.item():.6f} elapsed={elapsed:.1f}s"
+                )
             if should_log:
                 sample = train_data[: min(train_data.size(0), valid_data.size(0), 8192)]
                 train_eval = self.evaluate_sae(sae, sample)
                 valid_eval = self.evaluate_sae(sae, valid_data)
-                history.append(
-                    {
-                        "step": step,
-                        "train_mse": train_eval["validation_mse"],
-                        "valid_mse": valid_eval["validation_mse"],
-                        "explained_variance": valid_eval["explained_variance"],
-                        "dead_feature_rate": valid_eval["dead_feature_rate"],
-                    }
+                row = {
+                    "step": step,
+                    "train_mse": train_eval["validation_mse"],
+                    "valid_mse": valid_eval["validation_mse"],
+                    "explained_variance": valid_eval["explained_variance"],
+                    "dead_feature_rate": valid_eval["dead_feature_rate"],
+                }
+                history.append(row)
+                elapsed = time.perf_counter() - start_time
+                self.logger.write(
+                    f"[metric step={step}] {run_name}: "
+                    f"loss={loss.item():.6f} train_mse={row['train_mse']:.6f} "
+                    f"valid_mse={row['valid_mse']:.6f} ev={row['explained_variance']:.4f} "
+                    f"dead={row['dead_feature_rate']:.4f} elapsed={elapsed:.1f}s"
                 )
 
         elapsed = time.perf_counter() - start_time
@@ -260,6 +311,7 @@ class SelfSAE:
             f"{model_name}_modelseed{model_seed}_"
             f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}.pt"
         )
+        self.logger.write(f"[save] {run_name} checkpoint -> {ckpt}")
         torch.save(
             {
                 "sae": sae.state_dict(),
@@ -271,6 +323,10 @@ class SelfSAE:
                 },
             },
             ckpt,
+        )
+        self.logger.log_stage_end(
+            f"{run_name} valid_mse={metrics['validation_mse']:.6f} "
+            f"ev={metrics['explained_variance']:.4f} dead={metrics['dead_feature_rate']:.4f}"
         )
 
         figure_prefix = (
@@ -320,28 +376,6 @@ class SelfSAE:
             },
             "checkpoint_path": str(ckpt),
         }
-
-    def mean_std(self, values):
-        clean = [value for value in values if value is not None and math.isfinite(value)]
-        if not clean:
-            return {"mean": None, "std": None}
-        mean = sum(clean) / len(clean)
-        var = sum((value - mean) ** 2 for value in clean) / len(clean)
-        return {"mean": mean, "std": math.sqrt(var)}
-
-    def write_csv(self, rows, path):
-        ensure_dir(Path(path).parent)
-        if not rows:
-            return
-        fieldnames = []
-        for row in rows:
-            for key in row:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
 
     def flatten_rows(self, serializable):
         rows = []
@@ -406,19 +440,25 @@ class SelfSAE:
         for (model_name, layer), values in grouped.items():
             row = {"model_name": model_name, "layer": layer}
             for metric, metric_values in values.items():
-                stats = self.mean_std(metric_values)
+                stats = mean_std(metric_values)
                 row[f"{metric}_mean"] = stats["mean"]
                 row[f"{metric}_std"] = stats["std"]
             summary_rows.append(row)
         return summary_rows
 
     def run(self):
+        self.logger.log_stage_start(
+            f"SAE stage models={list(self.train_res.keys())} layers={list(self.sae_cfg.layers)} "
+            f"dict_sizes={list(self.sae_cfg.dictionary_sizes)} k={list(self.sae_cfg.topk_values)} "
+            f"sae_seeds={list(self.sae_cfg.seeds)}"
+        )
         if (
             getattr(self.sae_cfg, "skip_completed_stage", True)
             and manifest_is_current(self.stage_manifest_path(), self.stage_config(), self.stage_outputs())
         ):
             loaded = self.load_completed_sae_res()
             if loaded is not None:
+                self.logger.log_stage_end("skip SAE stage: existing outputs match config")
                 return loaded
 
         sae_res = {}
@@ -432,19 +472,32 @@ class SelfSAE:
                 sae_res[model_name][model_seed] = {}
                 serializable[model_name][str(model_seed)] = {}
                 checkpoint_selection = train_item["train_state"]["checkpoint_selection"]
+                self.logger.log_stage_start(f"SAE model {model_name} seed {model_seed}")
                 for layer in self.sae_cfg.layers:
+                    self.logger.log_stage_start(f"SAE prepare activations {model_name} seed {model_seed} layer {layer}")
                     train_acts_raw = self.collect_activations(
-                        model, layer, "train", self.sae_cfg.max_activation_tokens
+                        model,
+                        layer,
+                        "train",
+                        self.sae_cfg.max_activation_tokens,
+                        model_name=model_name,
+                        model_seed=model_seed,
                     )
                     valid_acts_raw = self.collect_activations(
                         model,
                         layer,
                         "valid",
                         getattr(self.sae_cfg, "max_validation_activation_tokens", 16384),
+                        model_name=model_name,
+                        model_seed=model_seed,
                     )
                     stats = self.activation_stats(train_acts_raw)
                     train_acts = self.normalize(train_acts_raw, stats)
                     valid_acts = self.normalize(valid_acts_raw, stats)
+                    self.logger.log_stage_end(
+                        f"SAE prepare activations {model_name} seed {model_seed} layer {layer} "
+                        f"train_tokens={train_acts.size(0)} valid_tokens={valid_acts.size(0)}"
+                    )
                     layer_res = []
                     for dict_size in self.sae_cfg.dictionary_sizes:
                         for k in self.sae_cfg.topk_values:
@@ -473,12 +526,13 @@ class SelfSAE:
                         }
                         for item in layer_res
                     ]
+                self.logger.log_stage_end(f"SAE model {model_name} seed {model_seed}")
 
         save_json(serializable, Path(PATH.raw_metrics_dir) / "sae_res.json")
         rows = self.flatten_rows(serializable)
         summary_rows = self.summarize_rows(rows)
-        self.write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
-        self.write_csv(
+        write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
+        write_csv(
             summary_rows,
             Path(PATH.table_dir) / "phase4a_sae_summary.csv",
         )
@@ -501,4 +555,5 @@ class SelfSAE:
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
         )
         save_manifest(self.stage_manifest_path(), "sae", self.stage_config(), self.stage_outputs())
+        self.logger.log_stage_end("SAE stage")
         return sae_res

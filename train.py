@@ -1,5 +1,5 @@
-import csv
 import math
+import os
 import random
 import time
 from pathlib import Path
@@ -25,10 +25,12 @@ from utils import (
     get_device,
     load_json,
     manifest_is_current,
+    mean_std,
     perplexity,
     save_json,
     save_manifest,
     set_seed,
+    write_csv,
 )
 from model import GPTLikeTransformer
 from visualize import (
@@ -90,6 +92,7 @@ class Train:
         return Path(PATH.raw_metrics_dir) / "train_manifest.json"
 
     def load_completed_train_res(self):
+        self.logger.log_stage_start("load completed train results")
         serializable = load_json(Path(PATH.raw_metrics_dir) / "train_res.json")
         train_res = {}
         for model_name, seed_items in serializable.items():
@@ -100,6 +103,9 @@ class Train:
                 checkpoint_path = state.get("checkpoint_path")
                 if not checkpoint_path or not Path(checkpoint_path).exists():
                     return None
+                self.logger.write(
+                    f"[load] train checkpoint model={model_name} seed={seed} path={checkpoint_path}"
+                )
                 model = GPTLikeTransformer(self.model_cfg, model_name).to(self.device)
                 self.load_checkpoint(checkpoint_path, model)
                 train_res[model_name][seed] = {
@@ -107,6 +113,7 @@ class Train:
                     "train_state": state,
                     "analysis_res": item.get("analysis_res", {}),
                 }
+        self.logger.log_stage_end("load completed train results")
         return train_res
 
     @torch.no_grad()
@@ -291,7 +298,7 @@ class Train:
             for metric, values in metrics.items():
                 groups[stage].setdefault(metric, []).extend(values)
         return {
-            stage: {metric: self.mean_std(values) for metric, values in metrics.items()}
+            stage: {metric: mean_std(values) for metric, values in metrics.items()}
             for stage, metrics in groups.items()
         }
 
@@ -447,7 +454,7 @@ class Train:
                     if head < len(values):
                         row[metric] = values[head]
                 rows.append(row)
-        self.write_csv(rows, Path(PATH.table_dir) / f"{model_name}_seed{seed}_phase3_head_metrics.csv")
+        write_csv(rows, Path(PATH.table_dir) / f"{model_name}_seed{seed}_phase3_head_metrics.csv")
 
         taxonomy_rows = []
         for item in phase3["head_taxonomy"]["heads"]:
@@ -465,7 +472,7 @@ class Train:
                     "toeplitz_deviation": item["toeplitz_deviation"],
                 }
             )
-        self.write_csv(taxonomy_rows, Path(PATH.table_dir) / f"{model_name}_seed{seed}_phase3_head_taxonomy.csv")
+        write_csv(taxonomy_rows, Path(PATH.table_dir) / f"{model_name}_seed{seed}_phase3_head_taxonomy.csv")
 
     def save_checkpoint(
         self,
@@ -505,7 +512,9 @@ class Train:
         }
         if optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
-        torch.save(payload, path)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, path)
         return str(path)
 
     def latest_checkpoint_path(self, model_name, seed):
@@ -522,6 +531,10 @@ class Train:
             return None
         return str(max(candidates, key=lambda item: item[0])[1])
 
+    def final_checkpoint_path(self, model_name, seed):
+        path = Path(PATH.ckpt_dir) / "models" / f"{model_name}_seed{seed}_step{self.train_cfg.steps}.pt"
+        return str(path) if path.exists() else None
+
     def load_checkpoint(self, path, model, optimizer=None):
         ckpt = torch.load(path, map_location=self.device)
         model.load_state_dict(ckpt["model"])
@@ -537,6 +550,127 @@ class Train:
             "divergence_count": ckpt.get("divergence_count", 0),
             "path": str(path),
         }
+
+    def checkpoint_protocol(self):
+        return {
+            "primary_checkpoint_rule": getattr(self.train_cfg, "primary_checkpoint_rule", "final_step"),
+            "secondary_checkpoint_rule": getattr(
+                self.train_cfg,
+                "secondary_checkpoint_rule",
+                "validation_loss_matched",
+            ),
+            "validation_loss_match_target": getattr(self.train_cfg, "validation_loss_match_target", None),
+        }
+
+    def final_validation_row(self, model, history):
+        final_valid = None
+        for row in reversed(history):
+            if row.get("step") == self.train_cfg.steps and "valid_loss" in row:
+                final_valid = row
+                break
+        return final_valid or self.validate(model)
+
+    def build_train_result(
+        self,
+        model,
+        model_name,
+        seed,
+        checkpoint_path,
+        final_valid,
+        best_valid,
+        validation_checkpoints,
+        history,
+        train_losses,
+        grad_norms,
+        divergence_count,
+        elapsed_seconds,
+        analysis_reason,
+    ):
+        if best_valid is None or not math.isfinite(best_valid):
+            valid_losses = [row["valid_loss"] for row in history if "valid_loss" in row]
+            best_valid = min(valid_losses) if valid_losses else final_valid["valid_loss"]
+
+        final_checkpoint = self.checkpoint_metadata(
+            model_name,
+            seed,
+            self.train_cfg.steps,
+            checkpoint_path,
+            final_valid["valid_loss"],
+            "final_step",
+        )
+        validation_checkpoints = [
+            item for item in validation_checkpoints
+            if item["checkpoint_step"] != self.train_cfg.steps
+        ]
+        validation_checkpoints.append(final_checkpoint)
+        stability = self.stability_metrics(train_losses, grad_norms, divergence_count, elapsed_seconds)
+        if self.train_cfg.run_loss_curve:
+            plot_loss_curve(
+                history,
+                Path(PATH.figure_dir) / f"{model_name}_seed{seed}_loss.png",
+            )
+        return {
+            "model": model,
+            "train_state": {
+                "final_step": self.train_cfg.steps,
+                "best_valid_loss": best_valid,
+                "final_valid_loss": final_valid["valid_loss"],
+                "final_perplexity": final_valid["perplexity"],
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_step": self.train_cfg.steps,
+                "tokens_seen": self.train_cfg.steps * self.train_cfg.batch_size * self.model_cfg.seq_len,
+                "valid_loss_at_checkpoint": final_valid["valid_loss"],
+                "selection_rule": "final_step",
+                "checkpoint_selection": {
+                    "primary": final_checkpoint,
+                    "validation_candidates": validation_checkpoints,
+                    "validation_loss_matched": None,
+                    "protocol": self.checkpoint_protocol(),
+                },
+                "history": history,
+                "stability": stability,
+                "efficiency": {
+                    "elapsed_seconds": stability["elapsed_seconds"],
+                    "seconds_per_step": stability["seconds_per_step"],
+                    "tokens_per_second": stability["tokens_per_second"],
+                },
+                "length_sensitivity": self.length_sensitivity_report(),
+            },
+            "analysis_res": self.maybe_attention_analysis(
+                model,
+                model_name,
+                seed,
+                reason=analysis_reason,
+            ),
+        }
+
+    def train_state_from_loaded_checkpoint(
+        self,
+        model,
+        model_name,
+        seed,
+        loaded_state,
+        elapsed_seconds=0.0,
+    ):
+        history = loaded_state["history"]
+        best_valid = loaded_state["best_valid"]
+        final_valid = self.final_validation_row(model, history)
+        validation_checkpoints = self.validation_candidates_from_history(model_name, seed, history)
+        return self.build_train_result(
+            model=model,
+            model_name=model_name,
+            seed=seed,
+            checkpoint_path=loaded_state["path"],
+            final_valid=final_valid,
+            best_valid=best_valid,
+            validation_checkpoints=validation_checkpoints,
+            history=history,
+            train_losses=loaded_state["train_losses"],
+            grad_norms=loaded_state["grad_norms"],
+            divergence_count=loaded_state["divergence_count"],
+            elapsed_seconds=elapsed_seconds,
+            analysis_reason="final_checkpoint_skip",
+        )
 
     def validation_candidates_from_history(self, model_name, seed, history):
         candidates = []
@@ -633,10 +767,39 @@ class Train:
             },
         }
 
+    def maybe_attention_analysis(self, model, model_name, seed, reason):
+        if not getattr(self.train_cfg, "run_phase3_analysis", True):
+            self.logger.log_stage_end(f"Phase 3 skipped for {model_name} seed {seed}: run_phase3_analysis=False")
+            return {}
+        if reason == "final_checkpoint_skip" and not getattr(
+            self.train_cfg, "run_phase3_on_final_checkpoint_skip", False
+        ):
+            self.logger.log_stage_end(
+                f"Phase 3 skipped for {model_name} seed {seed}: final checkpoint already exists"
+            )
+            return {}
+        self.logger.log_stage_start(f"Phase 3 attention analysis {model_name} seed {seed} reason={reason}")
+        analysis = self.attention_analysis(model, model_name=model_name, seed=seed)
+        self.logger.log_stage_end(f"Phase 3 attention analysis {model_name} seed {seed}")
+        return analysis
+
     def train_one_model(self, model_name, base_model, seed):
         set_seed(seed)
         model = GPTLikeTransformer(self.model_cfg, model_name).to(self.device)
         opt = self.optimizer(model)
+        final_path = self.final_checkpoint_path(model_name, seed)
+        if getattr(self.train_cfg, "resume_from_checkpoint", True) and final_path:
+            self.logger.log_stage_start(
+                f"skip training {model_name} seed {seed}: final checkpoint exists at step {self.train_cfg.steps}"
+            )
+            loaded_state = self.load_checkpoint(final_path, model)
+            return self.train_state_from_loaded_checkpoint(
+                model,
+                model_name,
+                seed,
+                loaded_state,
+                elapsed_seconds=0.0,
+            )
         start_step = 0
         train_iter = iter(self.loader("train", shuffle=True))
         history = []
@@ -705,7 +868,7 @@ class Train:
                         step,
                         valid_loss=valid["valid_loss"],
                         selection_rule="validation_candidate",
-                        optimizer=opt,
+                        optimizer=None,
                         history=history,
                         train_losses=train_losses,
                         grad_norms=grad_norms,
@@ -723,13 +886,14 @@ class Train:
                         )
                     )
             if step % self.train_cfg.save_interval == 0 or step == self.train_cfg.steps:
+                should_save_optimizer = bool(getattr(self.train_cfg, "save_optimizer_checkpoints", True))
                 ckpt_path = self.save_checkpoint(
                     model,
                     model_name,
                     seed,
                     step,
                     selection_rule="periodic_or_final",
-                    optimizer=opt,
+                    optimizer=opt if should_save_optimizer else None,
                     history=history,
                     train_losses=train_losses,
                     grad_norms=grad_norms,
@@ -746,79 +910,28 @@ class Train:
             self.train_cfg.steps,
             valid_loss=final_valid["valid_loss"],
             selection_rule="final_step",
-            optimizer=opt,
+            optimizer=opt if getattr(self.train_cfg, "save_final_optimizer", True) else None,
             history=history,
             train_losses=train_losses,
             grad_norms=grad_norms,
             best_valid=best_valid,
             divergence_count=divergence_count,
         )
-        final_checkpoint = self.checkpoint_metadata(
-            model_name,
-            seed,
-            self.train_cfg.steps,
-            ckpt_path,
-            final_valid["valid_loss"],
-            "final_step",
+        return self.build_train_result(
+            model=model,
+            model_name=model_name,
+            seed=seed,
+            checkpoint_path=ckpt_path,
+            final_valid=final_valid,
+            best_valid=best_valid,
+            validation_checkpoints=validation_checkpoints,
+            history=history,
+            train_losses=train_losses,
+            grad_norms=grad_norms,
+            divergence_count=divergence_count,
+            elapsed_seconds=elapsed_seconds,
+            analysis_reason="trained_to_final",
         )
-        validation_checkpoints = [
-            item for item in validation_checkpoints
-            if item["checkpoint_step"] != self.train_cfg.steps
-        ]
-        validation_checkpoints.append(final_checkpoint)
-        stability = self.stability_metrics(train_losses, grad_norms, divergence_count, elapsed_seconds)
-        if self.train_cfg.run_loss_curve:
-            plot_loss_curve(
-                history,
-                Path(PATH.figure_dir) / f"{model_name}_seed{seed}_loss.png",
-            )
-        return {
-            "model": model,
-            "train_state": {
-                "final_step": self.train_cfg.steps,
-                "best_valid_loss": best_valid,
-                "final_valid_loss": final_valid["valid_loss"],
-                "final_perplexity": final_valid["perplexity"],
-                "checkpoint_path": ckpt_path,
-                "checkpoint_step": self.train_cfg.steps,
-                "tokens_seen": self.train_cfg.steps * self.train_cfg.batch_size * self.model_cfg.seq_len,
-                "valid_loss_at_checkpoint": final_valid["valid_loss"],
-                "selection_rule": "final_step",
-                "checkpoint_selection": {
-                    "primary": final_checkpoint,
-                    "validation_candidates": validation_checkpoints,
-                    "validation_loss_matched": None,
-                    "protocol": {
-                        "primary_checkpoint_rule": getattr(
-                            self.train_cfg, "primary_checkpoint_rule", "final_step"
-                        ),
-                        "secondary_checkpoint_rule": getattr(
-                            self.train_cfg, "secondary_checkpoint_rule", "validation_loss_matched"
-                        ),
-                        "validation_loss_match_target": getattr(
-                            self.train_cfg, "validation_loss_match_target", None
-                        ),
-                    },
-                },
-                "history": history,
-                "stability": stability,
-                "efficiency": {
-                    "elapsed_seconds": stability["elapsed_seconds"],
-                    "seconds_per_step": stability["seconds_per_step"],
-                    "tokens_per_second": stability["tokens_per_second"],
-                },
-                "length_sensitivity": self.length_sensitivity_report(),
-            },
-            "analysis_res": self.attention_analysis(model, model_name=model_name, seed=seed),
-        }
-
-    def mean_std(self, values):
-        clean = [value for value in values if value is not None and math.isfinite(value)]
-        if not clean:
-            return {"mean": None, "std": None}
-        mean = sum(clean) / len(clean)
-        var = sum((value - mean) ** 2 for value in clean) / len(clean)
-        return {"mean": mean, "std": math.sqrt(var)}
 
     def percentile(self, values, q):
         if not values:
@@ -1014,7 +1127,7 @@ class Train:
                 per_seed_rows.append(row)
                 for key in metrics_by_name:
                     metrics_by_name[key].append(row[key])
-            summary[model_name] = {key: self.mean_std(values) for key, values in metrics_by_name.items()}
+            summary[model_name] = {key: mean_std(values) for key, values in metrics_by_name.items()}
         paired_stats = self.paired_difference_stats(per_seed_rows)
         return {"by_model": summary, "per_seed": per_seed_rows, "paired_stats": paired_stats}
 
@@ -1067,25 +1180,11 @@ class Train:
                 )
         return rows
 
-    def write_csv(self, rows, path):
-        ensure_dir(Path(path).parent)
-        if not rows:
-            return
-        fieldnames = []
-        for row in rows:
-            for key in row.keys():
-                if key not in fieldnames:
-                    fieldnames.append(key)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-
     def write_summary_tables(self, summary):
         per_seed_path = Path(PATH.table_dir) / "phase2_per_seed.csv"
-        self.write_csv(summary["per_seed"], per_seed_path)
-        self.write_csv(summary.get("paired_stats", []), Path(PATH.table_dir) / "phase2_paired_stats.csv")
-        self.write_csv(
+        write_csv(summary["per_seed"], per_seed_path)
+        write_csv(summary.get("paired_stats", []), Path(PATH.table_dir) / "phase2_paired_stats.csv")
+        write_csv(
             summary.get("checkpoint_comparison", []),
             Path(PATH.table_dir) / "phase2_checkpoint_comparison.csv",
         )
@@ -1097,7 +1196,7 @@ class Train:
                 row[f"{metric_name}_std"] = stats["std"]
             rows.append(row)
         aggregate_path = Path(PATH.table_dir) / "phase2_summary.csv"
-        self.write_csv(rows, aggregate_path)
+        write_csv(rows, aggregate_path)
 
     def plot_aggregate_curves(self, serializable):
         if not self.train_cfg.run_loss_curve:
@@ -1156,25 +1255,25 @@ class Train:
         for model_name, model_item in by_model.items():
             summary[model_name] = {
                 "layer_wise": {
-                    metric: {layer: self.mean_std(values) for layer, values in layers.items()}
+                    metric: {layer: mean_std(values) for layer, values in layers.items()}
                     for metric, layers in model_item["layer_wise"].items()
                 },
                 "stage_wise": {
-                    stage: {metric: self.mean_std(values) for metric, values in metrics.items()}
+                    stage: {metric: mean_std(values) for metric, values in metrics.items()}
                     for stage, metrics in model_item["stage_wise"].items()
                 },
                 "taxonomy_counts": {
-                    label: self.mean_std(values) for label, values in model_item["taxonomy_counts"].items()
+                    label: mean_std(values) for label, values in model_item["taxonomy_counts"].items()
                 },
             }
         return {"by_model": summary, "layer_rows": layer_rows, "taxonomy_rows": taxonomy_rows}
 
     def write_phase3_summary_tables(self, phase3_summary):
-        self.write_csv(
+        write_csv(
             phase3_summary["layer_rows"],
             Path(PATH.table_dir) / "phase3_layer_metrics.csv",
         )
-        self.write_csv(
+        write_csv(
             phase3_summary["taxonomy_rows"],
             Path(PATH.table_dir) / "phase3_taxonomy_counts.csv",
         )

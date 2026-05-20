@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 
-REMARK = "这是版本0.9哦，提高批次吧"
+REMARK = "PoPE research pipeline v0.9"
 
 try:
     from dotenv import load_dotenv
@@ -75,7 +75,7 @@ TRAIN = SimpleNamespace(
     # representative_* keeps Phase 3 affordable on two A100s.
     seeds=[42],
     steps=120000,
-    batch_size=8,
+    batch_size=12,
     lr=6e-5,
     weight_decay=0.1,
     warmup_steps=1000,
@@ -83,17 +83,21 @@ TRAIN = SimpleNamespace(
     precision="bf16",
     device="cuda",
     log_interval=100,
-    eval_interval=5000,
-    save_interval=5000,
+    eval_interval=10000,
+    save_interval=10000,
     analysis_batches=1,
     loss_spike_threshold=0.5,
     loss_threshold=None,
     primary_checkpoint_rule="final_step",
     secondary_checkpoint_rule="validation_loss_matched",
     validation_loss_match_target=None,
-    save_eval_checkpoints=True,
+    save_eval_checkpoints=False,
+    save_optimizer_checkpoints=False,
+    save_final_optimizer=True,
     skip_completed_runs=True,
     resume_from_checkpoint=True,
+    run_phase3_analysis=True,
+    run_phase3_on_final_checkpoint_skip=False,
     run_length_extrapolation=False,
     extrapolation_seq_lens=[2048],
     run_position_synthetic_task=False,

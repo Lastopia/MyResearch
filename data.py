@@ -123,6 +123,10 @@ class GenerateData:
             tokenizer = TinyTokenizer()
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        # We tokenize raw documents and then split them into fixed-size blocks,
+        # so individual document length should not trigger GPT-2's 1024-token warning.
+        if hasattr(tokenizer, "model_max_length"):
+            tokenizer.model_max_length = max(int(1e9), self.data_cfg.seq_len + 1)
         return tokenizer
 
     def text_stream(self):

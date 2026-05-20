@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 import torch
 
 from para import PATH, SECRETS
-from utils import ensure_dir, load_json, manifest_is_current, save_json, save_manifest
+from sae import load_sae_item
+from utils import ensure_dir, load_json, manifest_is_current, save_json, save_manifest, write_csv
 
 
 class InterpretSAE:
@@ -77,20 +78,6 @@ class InterpretSAE:
             return tokenizer.decode([int(x) for x in ids])
         inv = {v: k for k, v in getattr(tokenizer, "stoi", {}).items()}
         return "".join(inv.get(int(x), "") for x in ids)
-
-    def write_csv(self, rows, path):
-        ensure_dir(Path(path).parent)
-        if not rows:
-            return
-        fieldnames = []
-        for row in rows:
-            for key in row:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
 
     def read_csv(self, path):
         path = Path(path)
@@ -198,6 +185,8 @@ class InterpretSAE:
     @torch.no_grad()
     def collect_contexts(self, model, sae_item, layer, feature_id):
         model.eval()
+        device = next(model.parameters()).device
+        sae_item = load_sae_item(sae_item, device)
         sae = sae_item["sae"]
         sae.eval()
         stats = sae_item["normalization"]
@@ -206,7 +195,6 @@ class InterpretSAE:
         threshold = getattr(self.interp_cfg, "active_threshold", 0.0)
         candidates = []
         loader = torch.utils.data.DataLoader(self.data_res["valid"], batch_size=1, shuffle=False)
-        device = next(model.parameters()).device
         for x, _ in loader:
             x = x.to(device)
             out = model(x, capture_layers=[layer])
@@ -239,6 +227,8 @@ class InterpretSAE:
     @torch.no_grad()
     def collect_contexts_for_features(self, model, sae_item, layer, feature_ids):
         model.eval()
+        device = next(model.parameters()).device
+        sae_item = load_sae_item(sae_item, device)
         sae = sae_item["sae"]
         sae.eval()
         stats = sae_item["normalization"]
@@ -248,7 +238,6 @@ class InterpretSAE:
         keep_per_feature = max_contexts * 8
         candidates = {int(feature_id): [] for feature_id in feature_ids}
         loader = torch.utils.data.DataLoader(self.data_res["valid"], batch_size=1, shuffle=False)
-        device = next(model.parameters()).device
         feature_ids = [int(feature_id) for feature_id in feature_ids]
         for x, _ in loader:
             x = x.to(device)
@@ -697,8 +686,8 @@ Top activating contexts:
         save_json(result, Path(PATH.raw_metrics_dir) / "phase6_interpretation_summary.json")
         save_json({"prompts": prompts}, Path(PATH.raw_metrics_dir) / "phase6_prompts.json")
         save_json({"records": run_records}, Path(PATH.raw_metrics_dir) / "phase6_run_records.json")
-        self.write_csv(rows, Path(PATH.table_dir) / "phase6_interpretation_scores.csv")
-        self.write_csv(summary, Path(PATH.table_dir) / "phase6_interpretation_summary.csv")
+        write_csv(rows, Path(PATH.table_dir) / "phase6_interpretation_scores.csv")
+        write_csv(summary, Path(PATH.table_dir) / "phase6_interpretation_summary.csv")
         case_path = Path(PATH.report_dir) / "phase6_feature_cases.md"
         ensure_dir(case_path.parent)
         with open(case_path, "w", encoding="utf-8") as f:

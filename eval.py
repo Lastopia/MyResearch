@@ -1,4 +1,3 @@
-import csv
 import math
 from pathlib import Path
 
@@ -8,14 +7,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from para import PATH
+from sae import load_sae_item
 from utils import (
-    ensure_dir,
     get_device,
     load_json,
     manifest_is_current,
+    mean_std,
     save_json,
     save_manifest,
     set_seed,
+    write_csv,
 )
 
 
@@ -385,20 +386,6 @@ class Evaluate:
             ],
         }
 
-    def write_csv(self, rows, path):
-        ensure_dir(Path(path).parent)
-        if not rows:
-            return
-        fieldnames = []
-        for row in rows:
-            for key in row:
-                if key not in fieldnames:
-                    fieldnames.append(key)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-
     def run_one(self, model_name, model_seed, layer, train_item, sae_items):
         model = train_item["model"].to(self.device)
         train_raw = self.collect_raw(model, layer, "train", getattr(self.eval_cfg, "max_probe_train_tokens", 8192))
@@ -413,6 +400,7 @@ class Evaluate:
         raw_probe = self.representation_probes(train_raw["acts"], valid_raw["acts"], targets)
         rows, feature_rows = [], []
         for sae_item in sae_items:
+            sae_item = load_sae_item(sae_item, self.device)
             sae = sae_item["sae"].to(self.device)
             stats = sae_item["normalization"]
             train_features = self.encode_sae(sae, train_raw["acts"], stats)
@@ -475,14 +463,9 @@ class Evaluate:
         for (model_name, layer), values in grouped.items():
             row = {"model_name": model_name, "layer": layer}
             for metric, metric_values in values.items():
-                if metric_values:
-                    mean = sum(metric_values) / len(metric_values)
-                    var = sum((x - mean) ** 2 for x in metric_values) / len(metric_values)
-                    row[f"{metric}_mean"] = mean
-                    row[f"{metric}_std"] = math.sqrt(var)
-                else:
-                    row[f"{metric}_mean"] = None
-                    row[f"{metric}_std"] = None
+                stats = mean_std(metric_values)
+                row[f"{metric}_mean"] = stats["mean"]
+                row[f"{metric}_std"] = stats["std"]
             summary.append(row)
         return summary
 
@@ -534,8 +517,8 @@ class Evaluate:
         }
         save_json(eval_res, Path(PATH.raw_metrics_dir) / "eval_res.json")
         save_json(eval_res, Path(PATH.raw_metrics_dir) / "phase5_summary.json")
-        self.write_csv(all_rows, Path(PATH.table_dir) / "phase5_disentanglement_runs.csv")
-        self.write_csv(summary, Path(PATH.table_dir) / "phase5_disentanglement_summary.csv")
-        self.write_csv(all_feature_rows, Path(PATH.table_dir) / "phase5_feature_scores.csv")
+        write_csv(all_rows, Path(PATH.table_dir) / "phase5_disentanglement_runs.csv")
+        write_csv(summary, Path(PATH.table_dir) / "phase5_disentanglement_summary.csv")
+        write_csv(all_feature_rows, Path(PATH.table_dir) / "phase5_feature_scores.csv")
         save_manifest(self.stage_manifest_path(), "eval", self.stage_config(), self.stage_outputs())
         return eval_res
