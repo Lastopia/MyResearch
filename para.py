@@ -75,7 +75,7 @@ TRAIN = SimpleNamespace(
     # representative_* keeps Phase 3 affordable on two A100s.
     seeds=[42],
     steps=120000,
-    batch_size=12,
+    batch_size=8,
     lr=6e-5,
     weight_decay=0.1,
     warmup_steps=1000,
