@@ -11,30 +11,10 @@ from eval import Evaluate
 from interpret import InterpretSAE
 from logger import ExperimentLogger
 from model import SelfTransformer
-from para import (
-    DATA,
-    EVAL,
-    INTERP,
-    MODEL,
-    PATH,
-    SAE,
-    SECRETS,
-    SMOKE_TEST,
-    TRAIN,
-    REMARK,
-    apply_smoke_test_config,
-)
+from para import (DATA,EVAL,INTERP,MODEL,PATH,SAE,SECRETS,SMOKE_TEST,TRAIN,REMARK,apply_smoke_test_config)
 from sae import SelfSAE
 from train import Train
-from utils import (
-    ensure_dirs,
-    load_json,
-    manifest_is_current,
-    namespace_to_dict,
-    runtime_environment_info,
-    save_json,
-    save_manifest,
-)
+from utils import (ensure_dirs,load_json,manifest_is_current,namespace_to_dict,runtime_environment_info,save_json,save_manifest)
 
 
 # Pipeline switches. Turning a stage off does not fabricate its output:
@@ -43,9 +23,9 @@ PIPELINE = SimpleNamespace(
     run_data=True,
     run_model=True,
     run_train=True,
-    run_sae=True,
-    run_eval=True,
-    run_interpret=True,
+    run_sae=False,
+    run_eval=False,
+    run_interpret=False,
     experiment_name="v0.2",
     # Optional training scheduler. It shards TRAIN by model_name x seed and
     # launches one shard per selected GPU.
