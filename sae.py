@@ -1,4 +1,5 @@
 import math
+import os
 import time
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from utils import (
     save_json,
     save_manifest,
     set_seed,
+    valid_torch_checkpoint,
     write_csv,
 )
 from visualize import plot_sae_health_curves, plot_sae_training_curves
@@ -52,8 +54,8 @@ def load_sae_item(sae_item, device):
         return sae_item
 
     ckpt_path = sae_item.get("checkpoint_path")
-    if not ckpt_path or not Path(ckpt_path).exists():
-        raise FileNotFoundError(f"Missing SAE checkpoint: {ckpt_path}")
+    if not ckpt_path or not valid_torch_checkpoint(ckpt_path):
+        raise FileNotFoundError(f"Missing or invalid SAE checkpoint: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
     meta = sae_item["meta"]
     normalization = ckpt["normalization"]
@@ -126,7 +128,7 @@ class SelfSAE:
                     layer_res = []
                     for item in items:
                         ckpt_path = item.get("checkpoint_path")
-                        if not ckpt_path or not Path(ckpt_path).exists():
+                        if not ckpt_path or not valid_torch_checkpoint(ckpt_path):
                             return None
                         meta = item["meta"]
                         layer_res.append(
@@ -312,6 +314,7 @@ class SelfSAE:
             f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}.pt"
         )
         self.logger.write(f"[save] {run_name} checkpoint -> {ckpt}")
+        tmp_ckpt = ckpt.with_suffix(ckpt.suffix + ".tmp")
         torch.save(
             {
                 "sae": sae.state_dict(),
@@ -322,8 +325,9 @@ class SelfSAE:
                     "enabled": getattr(self.sae_cfg, "normalize_activations", True),
                 },
             },
-            ckpt,
+            tmp_ckpt,
         )
+        os.replace(tmp_ckpt, ckpt)
         self.logger.log_stage_end(
             f"{run_name} valid_mse={metrics['validation_mse']:.6f} "
             f"ev={metrics['explained_variance']:.4f} dead={metrics['dead_feature_rate']:.4f}"

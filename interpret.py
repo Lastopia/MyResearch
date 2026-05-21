@@ -1,14 +1,12 @@
 import csv
-import json
 import math
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import torch
 
-from para import PATH, SECRETS
+from interpret_prompting import FeatureInterpreter
+from interpret_reports import InterpretationReporter
+from para import PATH
 from sae import load_sae_item
 from utils import ensure_dir, load_json, manifest_is_current, save_json, save_manifest, write_csv
 
@@ -21,6 +19,8 @@ class InterpretSAE:
         self.data_res = data_res or {}
         self.eval_res = eval_res or {}
         self.feature_scores = self.load_feature_scores()
+        self.interpreter = FeatureInterpreter(interp_cfg)
+        self.reporter = InterpretationReporter()
 
     def load_feature_scores(self):
         path = Path(PATH.table_dir) / "phase5_feature_scores.csv"
@@ -274,252 +274,6 @@ class InterpretSAE:
             candidates[feature_id] = items[:max_contexts]
         return candidates
 
-    def prompt_for_feature(self, item):
-        contexts = "\n".join(
-            [
-                (
-                    f"{idx + 1}. activated_token={ctx['activated_token']!r}, "
-                    f"activation={ctx['activation']:.4f}, position={ctx['position']}, "
-                    f"context={ctx['context']!r}"
-                )
-                for idx, ctx in enumerate(item["contexts"])
-            ]
-        )
-        return f"""You are evaluating a sparse autoencoder feature from a transformer.
-
-The model identity and position encoding are blinded. Use only the activation examples.
-
-Return strict JSON with these keys:
-feature_type: one of ["content", "position", "mixed", "low-level", "undiscernible"]
-interpretability_score: integer 1-5
-specificity_score: integer 1-5
-coverage_score: integer 1-5
-false_positive_risk: integer 1-5
-confidence_score: number 0-1
-short_explanation: string
-evidence_summary: string
-
-Rubric:
-5 means a clear, consistent pattern across almost all examples.
-3 means a plausible but incomplete pattern.
-1 means no stable pattern.
-false_positive_risk is higher when the explanation is overly broad.
-confidence_score is your confidence that the explanation is supported by the shown contexts.
-
-Feature metadata:
-blinded_feature_id: {item['blinded_feature_id']}
-layer: {item['layer']}
-phase5_label: {item['phase5_label']}
-
-Top activating contexts:
-{contexts}
-"""
-
-    def dry_run_response(self, item):
-        label = item["phase5_label"]
-        if label == "position_only":
-            feature_type = "position"
-            explanation = "Dry run: feature was selected as position-related by Phase 5 scores."
-        elif label == "content_only":
-            feature_type = "content"
-            explanation = "Dry run: feature was selected as content-related by Phase 5 scores."
-        elif label == "mixed":
-            feature_type = "mixed"
-            explanation = "Dry run: feature was selected as mixed by Phase 5 scores."
-        elif len(item["contexts"]) < getattr(self.interp_cfg, "min_active_contexts", 4):
-            feature_type = "undiscernible"
-            explanation = "Dry run: too few active contexts for a reliable interpretation."
-        else:
-            feature_type = "undiscernible"
-            explanation = "Dry run placeholder; set INTERP.dry_run=False to call OpenAI."
-        return {
-            "feature_type": feature_type,
-            "interpretability_score": 3,
-            "specificity_score": 3,
-            "coverage_score": 3,
-            "false_positive_risk": 3,
-            "confidence_score": 0.5,
-            "short_explanation": explanation,
-            "evidence_summary": "Dry run generated no external LLM evidence.",
-            "raw_response": None,
-        }
-
-    def call_openai(self, prompt):
-        api_key = getattr(SECRETS, "openai_api_key", None)
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
-        body = {
-            "model": getattr(self.interp_cfg, "model", "gpt-4o-mini"),
-            "messages": [
-                {
-                    "role": "developer",
-                    "content": "You are a careful mechanistic interpretability evaluator. Return only valid JSON.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": getattr(self.interp_cfg, "temperature", 0.0),
-            "max_tokens": getattr(self.interp_cfg, "max_tokens", 700),
-            "response_format": {"type": "json_object"},
-            "store": False,
-        }
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI API error {exc.code}: {detail}") from exc
-        content = payload["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        parsed["raw_response"] = content
-        parsed["raw_api_response"] = payload
-        return parsed
-
-    def score_item(self, item):
-        prompt = self.prompt_for_feature(item)
-        item["prompt"] = prompt
-        if getattr(self.interp_cfg, "dry_run", True):
-            return self.dry_run_response(item)
-        return self.call_openai(prompt)
-
-    def quality_score(self, response):
-        interp = float(response.get("interpretability_score", 0))
-        spec = float(response.get("specificity_score", 0))
-        cov = float(response.get("coverage_score", 0))
-        risk = float(response.get("false_positive_risk", 5))
-        return ((interp + spec + cov) / 3.0) - 0.25 * (risk - 1.0)
-
-    def summarize(self, rows):
-        grouped = {}
-        for row in rows:
-            key = (row["model_name"], row["layer"])
-            grouped.setdefault(key, []).append(row)
-        summary = []
-        for (model_name, layer), items in grouped.items():
-            quality = [row["quality_score"] for row in items]
-            interp = [row["interpretability_score"] for row in items]
-            risk = [row["false_positive_risk"] for row in items]
-            types = {}
-            for row in items:
-                types[row["feature_type"]] = types.get(row["feature_type"], 0) + 1
-            total = max(len(items), 1)
-            summary.append(
-                {
-                    "model_name": model_name,
-                    "layer": layer,
-                    "num_features": len(items),
-                    "mean_quality_score": sum(quality) / len(quality),
-                    "mean_interpretability_score": sum(interp) / len(interp),
-                    "mean_false_positive_risk": sum(risk) / len(risk),
-                    "undiscernible_ratio": types.get("undiscernible", 0) / total,
-                    "mixed_explanation_ratio": types.get("mixed", 0) / total,
-                    "content_ratio": types.get("content", 0) / total,
-                    "position_ratio": types.get("position", 0) / total,
-                    "low_level_ratio": types.get("low-level", 0) / total,
-                }
-            )
-        return summary
-
-    def plot_quality_summary(self, summary):
-        if not summary:
-            return []
-        paths = []
-        labels = [f"{row['model_name']}\nL{row['layer']}" for row in summary]
-        quality = [row["mean_quality_score"] for row in summary]
-        path = Path(PATH.figure_dir) / "phase6_mean_quality_score.png"
-        ensure_dir(path.parent)
-        plt.figure(figsize=(max(6, len(labels) * 0.7), 4))
-        plt.bar(range(len(labels)), quality)
-        plt.xticks(range(len(labels)), labels, rotation=45, ha="right")
-        plt.ylabel("mean quality score")
-        plt.tight_layout()
-        plt.savefig(path, dpi=160)
-        plt.close()
-        paths.append(str(path))
-
-        type_keys = ["content_ratio", "position_ratio", "mixed_explanation_ratio", "low_level_ratio", "undiscernible_ratio"]
-        bottoms = [0.0 for _ in summary]
-        path = Path(PATH.figure_dir) / "phase6_feature_type_distribution.png"
-        plt.figure(figsize=(max(6, len(labels) * 0.7), 4))
-        for key in type_keys:
-            vals = [row.get(key, 0.0) for row in summary]
-            plt.bar(range(len(labels)), vals, bottom=bottoms, label=key)
-            bottoms = [base + val for base, val in zip(bottoms, vals)]
-        plt.xticks(range(len(labels)), labels, rotation=45, ha="right")
-        plt.ylabel("ratio")
-        plt.legend(fontsize=8)
-        plt.tight_layout()
-        plt.savefig(path, dpi=160)
-        plt.close()
-        paths.append(str(path))
-        return paths
-
-    def case_markdown(self, rows, items_by_id):
-        lines = ["# Phase 6 Feature Interpretation Cases", ""]
-        sorted_rows = sorted(rows, key=lambda row: row["quality_score"], reverse=True)
-        cases = sorted_rows[:5] + sorted_rows[-5:]
-        for row in cases:
-            item = items_by_id[row["blinded_feature_id"]]
-            if item is None:
-                lines.extend(
-                    [
-                        f"## {row['blinded_feature_id']}",
-                        "",
-                        f"- Model: {row['model_name']}",
-                        f"- Layer: {row['layer']}",
-                        f"- Feature: {row['feature']}",
-                        f"- Feature type: {row['feature_type']}",
-                        f"- Quality score: {float(row['quality_score']):.3f}",
-                        "",
-                        "Explanation:",
-                        "",
-                        row["short_explanation"],
-                        "",
-                        "Top activating contexts unavailable from resumed score table.",
-                        "",
-                    ]
-                )
-                continue
-            lines.extend(
-                [
-                    f"## {row['blinded_feature_id']}",
-                    "",
-                    f"- Model: {row['model_name']}",
-                    f"- Layer: {row['layer']}",
-                    f"- Feature: {row['feature']}",
-                    f"- Feature type: {row['feature_type']}",
-                    f"- Quality score: {row['quality_score']:.3f}",
-                    f"- Interpretability score: {row['interpretability_score']}",
-                    f"- Specificity score: {row['specificity_score']}",
-                    f"- Coverage score: {row['coverage_score']}",
-                    f"- False-positive risk: {row['false_positive_risk']}",
-                    "",
-                    "Explanation:",
-                    "",
-                    row["short_explanation"],
-                    "",
-                    "Top activating contexts:",
-                    "",
-                ]
-            )
-            for idx, ctx in enumerate(item["contexts"][:5]):
-                lines.extend(
-                    [
-                        f"{idx + 1}. `{ctx['context']}`",
-                        f"   activated token: `{ctx['activated_token']}`; activation: {ctx['activation']:.4f}; position: {ctx['position']}",
-                        "",
-                    ]
-                )
-        return "\n".join(lines)
-
     def run(self):
         if (
             getattr(self.interp_cfg, "skip_completed_stage", True)
@@ -593,8 +347,8 @@ Top activating contexts:
                                 "position_score": candidate["position_score"],
                                 "contexts": contexts,
                             }
-                            response = self.score_item(item)
-                            quality = self.quality_score(response)
+                            response = self.interpreter.score_item(item)
+                            quality = self.interpreter.quality_score(response)
                             run_type = "dry_run" if dry_run else "openai_run"
                             provider = getattr(self.interp_cfg, "provider", "openai")
                             llm_model = getattr(self.interp_cfg, "model", "gpt-4o-mini")
@@ -662,8 +416,8 @@ Top activating contexts:
                                 }
                             )
                             items_by_id[blinded] = item
-        summary = self.summarize(rows) if rows else []
-        figure_paths = self.plot_quality_summary(summary)
+        summary = self.reporter.summarize(rows) if rows else []
+        figure_paths = self.reporter.plot_quality_summary(summary)
         result = {
             "phase": "6",
             "design": {
@@ -691,6 +445,10 @@ Top activating contexts:
         case_path = Path(PATH.report_dir) / "phase6_feature_cases.md"
         ensure_dir(case_path.parent)
         with open(case_path, "w", encoding="utf-8") as f:
-            f.write(self.case_markdown(rows, items_by_id) if rows else "# Phase 6 Feature Interpretation Cases\n\nNo cases selected.\n")
+            f.write(
+                self.reporter.case_markdown(rows, items_by_id)
+                if rows
+                else "# Phase 6 Feature Interpretation Cases\n\nNo cases selected.\n"
+            )
         save_manifest(self.stage_manifest_path(), "interpret", self.stage_config(), self.stage_outputs())
         return result

@@ -75,6 +75,21 @@ def manifest_is_current(manifest_path, config, output_paths) -> bool:
     return all(Path(path).exists() for path in output_paths)
 
 
+def valid_file(path: str | os.PathLike) -> bool:
+    path = Path(path)
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def valid_torch_checkpoint(path: str | os.PathLike) -> bool:
+    if not valid_file(path):
+        return False
+    try:
+        torch.load(path, map_location="cpu")
+    except Exception:
+        return False
+    return True
+
+
 def save_manifest(manifest_path, stage, config, output_paths) -> None:
     save_json(
         {

@@ -4,13 +4,26 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 from data import GenerateData
 from eval import Evaluate
 from interpret import InterpretSAE
 from logger import ExperimentLogger
 from model import SelfTransformer
-from para import DATA, EVAL, INTERP, MODEL, PATH, SAE, SECRETS, SMOKE_TEST, TRAIN, REMARK
+from para import (
+    DATA,
+    EVAL,
+    INTERP,
+    MODEL,
+    PATH,
+    SAE,
+    SECRETS,
+    SMOKE_TEST,
+    TRAIN,
+    REMARK,
+    apply_smoke_test_config,
+)
 from sae import SelfSAE
 from train import Train
 from utils import (
@@ -26,25 +39,38 @@ from utils import (
 
 # Pipeline switches. Turning a stage off does not fabricate its output:
 # downstream stages must be able to load the corresponding saved result.
-RUN_DATA = True
-RUN_MODEL = True
-RUN_TRAIN = True
-RUN_SAE = True
-RUN_EVAL = True
-RUN_INTERPRET = True
-EXPERIMENT_NAME = "v0.2"
-
-# Optional training scheduler. It shards TRAIN by model_name x seed and launches
-# one shard per selected GPU. Leave disabled for a single H100 or simple runs.
-USE_TRAIN_SCHEDULER = False
-TRAIN_SCHEDULER_GPU_IDS = ["0", "1"]
-TRAIN_SCHEDULER_MAX_PARALLEL = None
+PIPELINE = SimpleNamespace(
+    run_data=True,
+    run_model=True,
+    run_train=True,
+    run_sae=True,
+    run_eval=True,
+    run_interpret=True,
+    experiment_name="v0.2",
+    # Optional training scheduler. It shards TRAIN by model_name x seed and
+    # launches one shard per selected GPU.
+    use_train_scheduler=False,
+    train_scheduler_gpu_ids=["0", "1"],
+    train_scheduler_max_parallel=None,
+)
 
 if SMOKE_TEST:
-    RUN_SAE = False
-    RUN_EVAL = False
-    RUN_INTERPRET = False
-    EXPERIMENT_NAME = "smoke_test"
+    PIPELINE.run_sae = False
+    PIPELINE.run_eval = False
+    PIPELINE.run_interpret = False
+    PIPELINE.experiment_name = "smoke_test"
+
+def configure_smoke_test(output_root):
+    apply_smoke_test_config(root=output_root, include_downstream=True)
+    PIPELINE.run_data = True
+    PIPELINE.run_model = True
+    PIPELINE.run_train = True
+    PIPELINE.run_sae = True
+    PIPELINE.run_eval = True
+    PIPELINE.run_interpret = True
+    PIPELINE.use_train_scheduler = False
+    PIPELINE.train_scheduler_max_parallel = None
+    PIPELINE.experiment_name = "smoke_test"
 
 def prepare_dirs():
     ensure_dirs(
@@ -73,16 +99,16 @@ def experiment_config():
         "eval": namespace_to_dict(EVAL),
         "interpretation": namespace_to_dict(INTERP),
         "main": {
-            "run_data": RUN_DATA,
-            "run_model": RUN_MODEL,
-            "run_train": RUN_TRAIN,
-            "run_sae": RUN_SAE,
-            "run_eval": RUN_EVAL,
-            "run_interpret": RUN_INTERPRET,
-            "experiment_name": EXPERIMENT_NAME,
-            "use_train_scheduler": USE_TRAIN_SCHEDULER,
-            "train_scheduler_gpu_ids": TRAIN_SCHEDULER_GPU_IDS,
-            "train_scheduler_max_parallel": TRAIN_SCHEDULER_MAX_PARALLEL,
+            "run_data": PIPELINE.run_data,
+            "run_model": PIPELINE.run_model,
+            "run_train": PIPELINE.run_train,
+            "run_sae": PIPELINE.run_sae,
+            "run_eval": PIPELINE.run_eval,
+            "run_interpret": PIPELINE.run_interpret,
+            "experiment_name": PIPELINE.experiment_name,
+            "use_train_scheduler": PIPELINE.use_train_scheduler,
+            "train_scheduler_gpu_ids": PIPELINE.train_scheduler_gpu_ids,
+            "train_scheduler_max_parallel": PIPELINE.train_scheduler_max_parallel,
         },
         "secrets": {
             "hf_token_set": bool(getattr(SECRETS, "hf_token", None)),
@@ -96,7 +122,7 @@ def experiment_manifest():
     # are still valid.
     config = experiment_config()
     return {
-        "experiment_name": EXPERIMENT_NAME,
+        "experiment_name": PIPELINE.experiment_name,
         "config_snapshot": config,
         "random_seeds": {
             "data_seed": getattr(DATA, "seed", None),
@@ -158,8 +184,8 @@ def train_shard_commands():
     return commands
 
 def launch_train_scheduler():
-    gpu_ids = TRAIN_SCHEDULER_GPU_IDS or ["0"]
-    max_parallel = TRAIN_SCHEDULER_MAX_PARALLEL or len(gpu_ids)
+    gpu_ids = PIPELINE.train_scheduler_gpu_ids or ["0"]
+    max_parallel = PIPELINE.train_scheduler_max_parallel or len(gpu_ids)
     max_parallel = max(1, min(max_parallel, len(gpu_ids)))
     queue = train_shard_commands()
     running = []
@@ -292,15 +318,15 @@ def load_or_run_model(logger):
 
 def load_or_run_train(model_res, data_res, logger):
     train_runner = Train(TRAIN, model_res, data_res)
-    if RUN_TRAIN and USE_TRAIN_SCHEDULER:
+    if PIPELINE.run_train and PIPELINE.use_train_scheduler:
         logger.log_stage_start(
-            f"Train stage: scheduled run on GPUs={TRAIN_SCHEDULER_GPU_IDS} "
+            f"Train stage: scheduled run on GPUs={PIPELINE.train_scheduler_gpu_ids} "
             f"models={list(MODEL.model_names)} seeds={list(TRAIN.seeds)} steps={TRAIN.steps}"
         )
         result = scheduled_train(model_res, data_res)
         log_result(logger, "Train stage scheduled", result)
         return result
-    if RUN_TRAIN:
+    if PIPELINE.run_train:
         logger.log_stage_start(
             f"Train stage: run models={list(MODEL.model_names)} seeds={list(TRAIN.seeds)} "
             f"steps={TRAIN.steps} batch={TRAIN.batch_size} device={TRAIN.device}"
@@ -308,16 +334,16 @@ def load_or_run_train(model_res, data_res, logger):
         result = train_runner.run()
         log_result(logger, "Train stage", result)
         return result
-    logger.log_stage_start("Train stage: RUN_TRAIN=False, loading existing train results")
+    logger.log_stage_start("Train stage: disabled, loading existing train results")
     loaded = train_runner.load_completed_train_res()
     if loaded is None:
-        raise RuntimeError("RUN_TRAIN is False, but existing train_res/checkpoints could not be loaded.")
+        raise RuntimeError("Train stage is disabled, but existing train_res/checkpoints could not be loaded.")
     log_result(logger, "Train stage loaded", loaded)
     return loaded
 
 def load_or_run_sae(train_res, data_res, logger):
     sae_runner = SelfSAE(SAE, train_res, data_res)
-    if RUN_SAE:
+    if PIPELINE.run_sae:
         logger.log_stage_start(
             f"SAE stage: run layers={list(SAE.layers)} dict_sizes={list(SAE.dictionary_sizes)} "
             f"k={list(SAE.topk_values)} seeds={list(SAE.seeds)} steps={SAE.steps}"
@@ -325,16 +351,16 @@ def load_or_run_sae(train_res, data_res, logger):
         result = sae_runner.run()
         log_result(logger, "SAE stage", result)
         return result
-    logger.log_stage_start("SAE stage: RUN_SAE=False, loading existing SAE results")
+    logger.log_stage_start("SAE stage: disabled, loading existing SAE results")
     loaded = sae_runner.load_completed_sae_res()
     if loaded is None:
-        raise RuntimeError("RUN_SAE is False, but existing sae_res/checkpoints could not be loaded.")
+        raise RuntimeError("SAE stage is disabled, but existing sae_res/checkpoints could not be loaded.")
     log_result(logger, "SAE stage loaded", loaded)
     return loaded
 
 def load_or_run_eval(train_res, sae_res, data_res, logger):
     eval_path = Path(PATH.raw_metrics_dir) / "eval_res.json"
-    if RUN_EVAL:
+    if PIPELINE.run_eval:
         logger.log_stage_start(
             f"Eval stage: run layers={list(EVAL.layers)} probe_steps={EVAL.probe_steps} "
             f"probe_train_tokens={EVAL.max_probe_train_tokens}"
@@ -342,7 +368,7 @@ def load_or_run_eval(train_res, sae_res, data_res, logger):
         result = Evaluate(EVAL, train_res, sae_res, data_res).run()
         log_result(logger, "Eval stage", result)
         return result
-    logger.log_stage_start("Eval stage: RUN_EVAL=False, trying to load existing eval results")
+    logger.log_stage_start("Eval stage: disabled, trying to load existing eval results")
     if eval_path.exists():
         result = load_json(eval_path)
         log_result(logger, "Eval stage loaded eval_res", result)
@@ -361,24 +387,41 @@ def run():
     prepare_dirs()
     logger = ExperimentLogger()
     logger.log_stage_start(
-        f"Main pipeline: experiment={EXPERIMENT_NAME} "
-        f"flags=data:{RUN_DATA} model:{RUN_MODEL} train:{RUN_TRAIN} "
-        f"sae:{RUN_SAE} eval:{RUN_EVAL} interpret:{RUN_INTERPRET}"
+        f"Main pipeline: experiment={PIPELINE.experiment_name} "
+        f"flags=data:{PIPELINE.run_data} model:{PIPELINE.run_model} train:{PIPELINE.run_train} "
+        f"sae:{PIPELINE.run_sae} eval:{PIPELINE.run_eval} interpret:{PIPELINE.run_interpret}"
     )
     save_experiment_metadata(logger)
 
-    needs_data = stage_needs(RUN_DATA, RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
-    needs_model = stage_needs(RUN_MODEL, RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
-    needs_train = stage_needs(RUN_TRAIN, RUN_SAE, RUN_EVAL, RUN_INTERPRET)
-    needs_sae = stage_needs(RUN_SAE, RUN_EVAL, RUN_INTERPRET)
-    needs_eval = stage_needs(RUN_EVAL, RUN_INTERPRET)
+    needs_data = stage_needs(
+        PIPELINE.run_data,
+        PIPELINE.run_train,
+        PIPELINE.run_sae,
+        PIPELINE.run_eval,
+        PIPELINE.run_interpret,
+    )
+    needs_model = stage_needs(
+        PIPELINE.run_model,
+        PIPELINE.run_train,
+        PIPELINE.run_sae,
+        PIPELINE.run_eval,
+        PIPELINE.run_interpret,
+    )
+    needs_train = stage_needs(
+        PIPELINE.run_train,
+        PIPELINE.run_sae,
+        PIPELINE.run_eval,
+        PIPELINE.run_interpret,
+    )
+    needs_sae = stage_needs(PIPELINE.run_sae, PIPELINE.run_eval, PIPELINE.run_interpret)
+    needs_eval = stage_needs(PIPELINE.run_eval, PIPELINE.run_interpret)
 
     data_res = load_or_run_data(logger) if needs_data else None
     model_res = load_or_run_model(logger) if needs_model else None
     train_res = load_or_run_train(model_res, data_res, logger) if needs_train else None
     sae_res = load_or_run_sae(train_res, data_res, logger) if needs_sae else None
     eval_res = load_or_run_eval(train_res, sae_res, data_res, logger) if needs_eval else None
-    if RUN_INTERPRET:
+    if PIPELINE.run_interpret:
         logger.log_stage_start(
             f"Interpret stage: provider={INTERP.provider} model={INTERP.model} "
             f"dry_run={INTERP.dry_run} layers={list(INTERP.layers)}"
@@ -407,6 +450,8 @@ def run():
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--smoke-output-root", default="./output/smoke_test")
     parser.add_argument("--train-shard", action="store_true")
     parser.add_argument("--model-name")
     parser.add_argument("--seed", type=int)
@@ -420,13 +465,17 @@ def parse_args():
 if __name__ == "__main__":
     print(REMARK)
     args = parse_args()
+    if args.smoke_test:
+        configure_smoke_test(args.smoke_output_root)
     if args.train_shard:
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)
     else:
         if args.use_train_scheduler:
-            USE_TRAIN_SCHEDULER = True
+            PIPELINE.use_train_scheduler = True
         if args.train_gpus:
-            TRAIN_SCHEDULER_GPU_IDS = [item.strip() for item in args.train_gpus.split(",") if item.strip()]
+            PIPELINE.train_scheduler_gpu_ids = [
+                item.strip() for item in args.train_gpus.split(",") if item.strip()
+            ]
         if args.train_max_parallel:
-            TRAIN_SCHEDULER_MAX_PARALLEL = args.train_max_parallel
+            PIPELINE.train_scheduler_max_parallel = args.train_max_parallel
         run()

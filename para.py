@@ -184,17 +184,36 @@ INTERP = SimpleNamespace(
     skip_completed_stage=True,
 )
 
-if SMOKE_TEST:
+
+def set_output_tree(root):
+    PATH.output_dir = root
+    PATH.cache_dir = f"{root}/cache"
+    PATH.ckpt_dir = f"{root}/ckpt"
+    PATH.figure_dir = f"{root}/figures"
+    PATH.table_dir = f"{root}/tables"
+    PATH.log_dir = f"{root}/logs"
+    PATH.report_dir = f"{root}/reports"
+    PATH.raw_metrics_dir = f"{root}/raw_metrics"
+
+
+def apply_smoke_test_config(root="./output/smoke_test", include_downstream=True):
+    global SMOKE_TEST
+    SMOKE_TEST = True
+    set_output_tree(root)
+
     DATA.dataset = "tiny"
     DATA.seq_len = 64
     DATA.train_blocks = 32
     DATA.valid_blocks = 8
     DATA.use_cache = False
+    DATA.hf_cache_dir = f"{root}/cache/dataset"
 
+    MODEL.model_names = ["std", "rope", "pope"]
     MODEL.n_layers = 2
     MODEL.d_model = 128
     MODEL.n_heads = 4
     MODEL.d_ff = 512
+    MODEL.vocab_size = 128
     MODEL.seq_len = 64
     
     TRAIN.seeds = [42]
@@ -206,6 +225,14 @@ if SMOKE_TEST:
     TRAIN.eval_interval = 5
     TRAIN.save_interval = 5
     TRAIN.analysis_batches = 1
+    TRAIN.save_eval_checkpoints = False
+    TRAIN.save_optimizer_checkpoints = False
+    TRAIN.save_final_optimizer = False
+    TRAIN.representative_layers = [0, 1]
+    TRAIN.spectral_analysis_layers = [0, 1]
+    TRAIN.representative_heads = [0, 1]
+    TRAIN.spectral_analysis_heads = [0, 1]
+    TRAIN.max_heatmap_seq_len = 32
 
     SAE.layers = [0, 1]
     SAE.dictionary_sizes = [256]
@@ -216,3 +243,26 @@ if SMOKE_TEST:
     SAE.steps = 20
     SAE.seeds = [42]
     SAE.max_activation_tokens = 2048
+    SAE.max_validation_activation_tokens = 512
+    SAE.log_interval = 10
+    SAE.eval_interval = 10
+
+    EVAL.layers = [0, 1]
+    EVAL.max_probe_train_tokens = 512
+    EVAL.max_probe_valid_tokens = 256
+    EVAL.probe_steps = 5
+    EVAL.probe_batch_size = 64
+    EVAL.correlation_feature_sample = 64
+
+    INTERP.layers = [0, 1]
+    INTERP.model_seeds = [42]
+    INTERP.max_features_per_model_layer = 4
+    INTERP.max_contexts_per_feature = 4
+    INTERP.min_active_contexts = 1
+    INTERP.context_window = 4
+    INTERP.dry_run = True
+    return include_downstream
+
+
+if SMOKE_TEST:
+    apply_smoke_test_config(include_downstream=False)
