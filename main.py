@@ -26,7 +26,7 @@ PIPELINE = SimpleNamespace(
     run_sae=False,
     run_eval=False,
     run_interpret=False,
-    experiment_name="v0.2",
+    experiment_name="v1.0",
     # Optional training scheduler. It shards TRAIN by model_name x seed and
     # launches one shard per selected GPU.
     use_train_scheduler=False,

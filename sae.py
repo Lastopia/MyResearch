@@ -95,12 +95,28 @@ class SelfSAE:
             train_summary[model_name] = {}
             for seed, item in seeds.items():
                 state = item["train_state"]
-                train_summary[model_name][str(seed)] = state.get("checkpoint_selection", {}).get("primary")
+                checkpoint_selection = state.get("checkpoint_selection", {})
+                train_summary[model_name][str(seed)] = self.selected_model_checkpoint(checkpoint_selection)
         return {
             "sae": self.sae_cfg,
             "train_checkpoints": train_summary,
             "data_meta": self.data_res.get("meta", {}),
         }
+
+    def selected_model_checkpoint(self, checkpoint_selection):
+        return (
+            checkpoint_selection.get("best_validation")
+            or checkpoint_selection.get("primary")
+        )
+
+    def load_model_checkpoint(self, model, checkpoint):
+        if checkpoint is None:
+            raise FileNotFoundError("Missing selected model checkpoint metadata")
+        ckpt_path = checkpoint.get("checkpoint_path")
+        if not ckpt_path:
+            raise FileNotFoundError("Missing selected model checkpoint path")
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        model.load_state_dict(ckpt["model"])
 
     def stage_outputs(self):
         return [
@@ -359,10 +375,10 @@ class SelfSAE:
                 "k": k,
                 "activation_site": self.sae_cfg.activation_site,
                 "activation_normalization": getattr(self.sae_cfg, "normalize_activations", True),
-                "model_checkpoint_rule": model_checkpoint_selection["primary"]["selection_rule"],
-                "model_checkpoint_step": model_checkpoint_selection["primary"]["checkpoint_step"],
-                "model_checkpoint_path": model_checkpoint_selection["primary"]["checkpoint_path"],
-                "model_tokens_seen": model_checkpoint_selection["primary"]["tokens_seen"],
+                "model_checkpoint_rule": model_checkpoint_selection["selection_rule"],
+                "model_checkpoint_step": model_checkpoint_selection["checkpoint_step"],
+                "model_checkpoint_path": model_checkpoint_selection["checkpoint_path"],
+                "model_tokens_seen": model_checkpoint_selection["tokens_seen"],
                 "train_activation_tokens": train_acts.size(0),
                 "valid_activation_tokens": valid_acts.size(0),
             },
@@ -476,6 +492,8 @@ class SelfSAE:
                 sae_res[model_name][model_seed] = {}
                 serializable[model_name][str(model_seed)] = {}
                 checkpoint_selection = train_item["train_state"]["checkpoint_selection"]
+                selected_checkpoint = self.selected_model_checkpoint(checkpoint_selection)
+                self.load_model_checkpoint(model, selected_checkpoint)
                 self.logger.log_stage_start(f"SAE model {model_name} seed {model_seed}")
                 for layer in self.sae_cfg.layers:
                     self.logger.log_stage_start(f"SAE prepare activations {model_name} seed {model_seed} layer {layer}")
@@ -517,7 +535,7 @@ class SelfSAE:
                                         k,
                                         sae_seed,
                                         stats,
-                                        checkpoint_selection,
+                                        selected_checkpoint,
                                     )
                                 )
                     sae_res[model_name][model_seed][layer] = layer_res

@@ -58,9 +58,24 @@ class Train:
         return AdamW(model.parameters(), lr=self.train_cfg.lr, weight_decay=self.train_cfg.weight_decay)
 
     def lr_scale(self, step):
-        if step < self.train_cfg.warmup_steps:
-            return max(step, 1) / max(self.train_cfg.warmup_steps, 1)
-        return 1.0
+        warmup_steps = max(getattr(self.train_cfg, "warmup_steps", 0), 0)
+        if warmup_steps and step < warmup_steps:
+            return max(step, 1) / warmup_steps
+
+        schedule = getattr(self.train_cfg, "lr_schedule", "constant")
+        if schedule in {None, "constant"}:
+            return 1.0
+        if schedule != "cosine":
+            raise ValueError(f"Unsupported lr_schedule: {schedule}")
+
+        decay_steps = max(self.train_cfg.steps - warmup_steps, 1)
+        progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+        min_ratio = float(getattr(self.train_cfg, "min_lr_ratio", 0.0))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_ratio + (1.0 - min_ratio) * cosine
+
+    def learning_rate(self, step):
+        return self.train_cfg.lr * self.lr_scale(step)
 
     def autocast_context(self):
         enabled = self.device.type == "cuda" and self.train_cfg.precision in {"bf16", "fp16"}
@@ -174,6 +189,38 @@ class Train:
         os.replace(tmp_path, path)
         return str(path)
 
+    def remove_checkpoint_file(self, checkpoint_path):
+        if not checkpoint_path:
+            return
+        path = Path(checkpoint_path)
+        try:
+            resolved = path.resolve()
+            ckpt_root = (Path(PATH.ckpt_dir) / "models").resolve()
+            if ckpt_root not in resolved.parents:
+                return
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            self.logger.log_error(exc)
+
+    def prune_previous_best_checkpoint(self, validation_checkpoints, new_checkpoint_path):
+        if not getattr(self.train_cfg, "keep_only_latest_best_checkpoint", False):
+            return validation_checkpoints
+        new_path = str(new_checkpoint_path)
+        keep = []
+        for item in validation_checkpoints:
+            checkpoint_path = item.get("checkpoint_path")
+            is_old_best = (
+                item.get("selection_rule") == "best_validation"
+                and checkpoint_path
+                and checkpoint_path != new_path
+            )
+            if is_old_best:
+                self.remove_checkpoint_file(checkpoint_path)
+                continue
+            keep.append(item)
+        return keep
+
     def latest_checkpoint_path(self, model_name, seed):
         ckpt_dir = Path(PATH.ckpt_dir) / "models"
         candidates = []
@@ -219,6 +266,10 @@ class Train:
                 "validation_loss_matched",
             ),
             "validation_loss_match_target": getattr(self.train_cfg, "validation_loss_match_target", None),
+            "lr_schedule": getattr(self.train_cfg, "lr_schedule", "constant"),
+            "base_lr": self.train_cfg.lr,
+            "min_lr_ratio": getattr(self.train_cfg, "min_lr_ratio", None),
+            "warmup_steps": getattr(self.train_cfg, "warmup_steps", 0),
         }
 
     def final_validation_row(self, model, history):
@@ -262,6 +313,7 @@ class Train:
             if item["checkpoint_step"] != self.train_cfg.steps
         ]
         validation_checkpoints.append(final_checkpoint)
+        best_checkpoint = self.best_validation_checkpoint(validation_checkpoints)
         stability = self.stability_metrics(train_losses, grad_norms, divergence_count, elapsed_seconds)
         if self.train_cfg.run_loss_curve:
             plot_loss_curve(
@@ -280,8 +332,11 @@ class Train:
                 "tokens_seen": self.train_cfg.steps * self.train_cfg.batch_size * self.model_cfg.seq_len,
                 "valid_loss_at_checkpoint": final_valid["valid_loss"],
                 "selection_rule": "final_step",
+                "best_checkpoint_path": best_checkpoint["checkpoint_path"] if best_checkpoint else checkpoint_path,
+                "best_checkpoint_step": best_checkpoint["checkpoint_step"] if best_checkpoint else self.train_cfg.steps,
                 "checkpoint_selection": {
                     "primary": final_checkpoint,
+                    "best_validation": best_checkpoint,
                     "validation_candidates": validation_checkpoints,
                     "validation_loss_matched": None,
                     "protocol": self.checkpoint_protocol(),
@@ -361,6 +416,21 @@ class Train:
             "valid_loss_at_checkpoint": valid_loss,
             "selection_rule": selection_rule,
         }
+
+    def best_validation_checkpoint(self, candidates):
+        valid_candidates = [
+            item for item in candidates
+            if item.get("valid_loss_at_checkpoint") is not None
+        ]
+        if not valid_candidates:
+            return None
+        return min(valid_candidates, key=lambda item: item["valid_loss_at_checkpoint"])
+
+    def upsert_checkpoint_candidate(self, candidates, candidate):
+        return [
+            item for item in candidates
+            if item["checkpoint_step"] != candidate["checkpoint_step"]
+        ] + [candidate]
 
     def loss_threshold_step(self, losses):
         threshold = getattr(self.train_cfg, "loss_threshold", None)
@@ -482,6 +552,7 @@ class Train:
             validation_checkpoints = self.validation_candidates_from_history(model_name, seed, history)
             self.logger.log_stage_start(f"resume {model_name} seed {seed} from step {start_step}")
         start_time = time.perf_counter()
+        latest_valid = None
 
         for step in range(start_step + 1, self.train_cfg.steps + 1):
             model.train()
@@ -491,9 +562,9 @@ class Train:
                 train_iter = iter(self.loader("train", shuffle=True))
                 x, y = next(train_iter)
             x, y = x.to(self.device), y.to(self.device)
-            scale = self.lr_scale(step)
+            current_lr = self.learning_rate(step)
             for group in opt.param_groups:
-                group["lr"] = self.train_cfg.lr * scale
+                group["lr"] = current_lr
             opt.zero_grad(set_to_none=True)
             with self.autocast_context():
                 out = model(x, labels=y)
@@ -511,22 +582,36 @@ class Train:
             grad_norms.append((step, grad_norm_value))
 
             if step % self.train_cfg.log_interval == 0 or step == 1:
-                row = {"step": step, "train_loss": loss_value, "grad_norm": grad_norm_value}
+                row = {
+                    "step": step,
+                    "train_loss": loss_value,
+                    "grad_norm": grad_norm_value,
+                    "lr": current_lr,
+                }
                 history.append(row)
                 self.logger.log_metric(f"{model_name}/train_loss", row["train_loss"], step)
             if step % self.train_cfg.eval_interval == 0 or step == self.train_cfg.steps:
                 valid = self.validate(model)
                 history.append({"step": step, **valid})
+                improved = valid["valid_loss"] <= best_valid
                 best_valid = min(best_valid, valid["valid_loss"])
                 self.logger.log_metric(f"{model_name}/valid_loss", valid["valid_loss"], step)
-                if getattr(self.train_cfg, "save_eval_checkpoints", True):
+                save_best = getattr(self.train_cfg, "save_best_checkpoint", True) and improved
+                save_eval = getattr(self.train_cfg, "save_eval_checkpoints", True)
+                validation_selection_rule = "best_validation" if improved else "validation_candidate"
+                latest_valid = {
+                    "step": step,
+                    **valid,
+                    "selection_rule": validation_selection_rule,
+                }
+                if save_eval or save_best:
                     ckpt_path = self.save_checkpoint(
                         model,
                         model_name,
                         seed,
                         step,
                         valid_loss=valid["valid_loss"],
-                        selection_rule="validation_candidate",
+                        selection_rule=validation_selection_rule,
                         optimizer=None,
                         history=history,
                         train_losses=train_losses,
@@ -534,24 +619,41 @@ class Train:
                         best_valid=best_valid,
                         divergence_count=divergence_count,
                     )
-                    validation_checkpoints.append(
+                    if validation_selection_rule == "best_validation":
+                        validation_checkpoints = self.prune_previous_best_checkpoint(
+                            validation_checkpoints,
+                            ckpt_path,
+                        )
+                    validation_checkpoints = self.upsert_checkpoint_candidate(
+                        validation_checkpoints,
                         self.checkpoint_metadata(
                             model_name,
                             seed,
                             step,
                             ckpt_path,
                             valid["valid_loss"],
-                            "validation_candidate",
-                        )
+                            validation_selection_rule,
+                        ),
                     )
             if step % self.train_cfg.save_interval == 0 or step == self.train_cfg.steps:
                 should_save_optimizer = bool(getattr(self.train_cfg, "save_optimizer_checkpoints", True))
+                checkpoint_valid_loss = (
+                    latest_valid["valid_loss"]
+                    if latest_valid is not None and latest_valid["step"] == step
+                    else None
+                )
+                checkpoint_selection_rule = (
+                    latest_valid["selection_rule"]
+                    if checkpoint_valid_loss is not None
+                    else "periodic_or_final"
+                )
                 ckpt_path = self.save_checkpoint(
                     model,
                     model_name,
                     seed,
                     step,
-                    selection_rule="periodic_or_final",
+                    valid_loss=checkpoint_valid_loss,
+                    selection_rule=checkpoint_selection_rule,
                     optimizer=opt if should_save_optimizer else None,
                     history=history,
                     train_losses=train_losses,
@@ -559,9 +661,27 @@ class Train:
                     best_valid=best_valid,
                     divergence_count=divergence_count,
                 )
+                if checkpoint_valid_loss is not None:
+                    if checkpoint_selection_rule == "best_validation":
+                        validation_checkpoints = self.prune_previous_best_checkpoint(
+                            validation_checkpoints,
+                            ckpt_path,
+                        )
+                    validation_checkpoints = self.upsert_checkpoint_candidate(
+                        validation_checkpoints,
+                        self.checkpoint_metadata(
+                            model_name,
+                            seed,
+                            step,
+                            ckpt_path,
+                            checkpoint_valid_loss,
+                            checkpoint_selection_rule,
+                        ),
+                    )
 
         elapsed_seconds = time.perf_counter() - start_time
         final_valid = self.validate(model)
+        best_valid = min(best_valid, final_valid["valid_loss"])
         ckpt_path = self.save_checkpoint(
             model,
             model_name,
@@ -725,15 +845,23 @@ class Train:
             for seed, item in seed_items.items():
                 state = item["train_state"]
                 candidates = state["checkpoint_selection"]["validation_candidates"]
+                best = state["checkpoint_selection"].get("best_validation")
+                if best is None:
+                    best = self.best_validation_checkpoint(candidates)
                 matched = self.matched_validation_checkpoint(candidates, target)
+                state["checkpoint_selection"]["best_validation"] = best
                 state["checkpoint_selection"]["validation_loss_matched"] = matched
                 state["checkpoint_selection"]["protocol"]["validation_loss_match_target"] = target
+                state["best_checkpoint_path"] = best["checkpoint_path"] if best else state.get("checkpoint_path")
+                state["best_checkpoint_step"] = best["checkpoint_step"] if best else state.get("checkpoint_step")
                 state["matched_checkpoint_path"] = matched["checkpoint_path"] if matched else None
                 state["matched_valid_loss"] = matched["valid_loss_at_checkpoint"] if matched else None
                 state["matched_checkpoint_step"] = matched["checkpoint_step"] if matched else None
 
                 train_item = train_res[model_name][int(seed)]["train_state"]
                 train_item["checkpoint_selection"] = state["checkpoint_selection"]
+                train_item["best_checkpoint_path"] = state["best_checkpoint_path"]
+                train_item["best_checkpoint_step"] = state["best_checkpoint_step"]
                 train_item["matched_checkpoint_path"] = state["matched_checkpoint_path"]
                 train_item["matched_valid_loss"] = state["matched_valid_loss"]
                 train_item["matched_checkpoint_step"] = state["matched_checkpoint_step"]
@@ -779,6 +907,8 @@ class Train:
                     "checkpoint_path": state.get("checkpoint_path"),
                     "valid_loss_at_checkpoint": state.get("valid_loss_at_checkpoint"),
                     "selection_rule": state.get("selection_rule"),
+                    "best_checkpoint_step": state.get("best_checkpoint_step"),
+                    "best_checkpoint_path": state.get("best_checkpoint_path"),
                     "matched_checkpoint_step": state.get("matched_checkpoint_step"),
                     "matched_checkpoint_path": state.get("matched_checkpoint_path"),
                     "matched_valid_loss": state.get("matched_valid_loss"),
