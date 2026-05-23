@@ -160,11 +160,15 @@ class Train:
         grad_norms=None,
         best_valid=None,
         divergence_count=0,
+        name_suffix=None,
     ):
         ensure_dir(Path(PATH.ckpt_dir) / "models")
-        path = Path(PATH.ckpt_dir) / "models" / (
-            f"{model_name}_seed{seed}_step{step}.pt"
+        filename = (
+            f"{model_name}_seed{seed}_{name_suffix}.pt"
+            if name_suffix
+            else f"{model_name}_seed{seed}_step{step}.pt"
         )
+        path = Path(PATH.ckpt_dir) / "models" / filename
         metadata = {
             "model_name": model_name,
             "seed": seed,
@@ -210,13 +214,10 @@ class Train:
         keep = []
         for item in validation_checkpoints:
             checkpoint_path = item.get("checkpoint_path")
-            is_old_best = (
-                item.get("selection_rule") == "best_validation"
-                and checkpoint_path
-                and checkpoint_path != new_path
-            )
+            is_old_best = item.get("selection_rule") == "best_validation"
             if is_old_best:
-                self.remove_checkpoint_file(checkpoint_path)
+                if checkpoint_path != new_path:
+                    self.remove_checkpoint_file(checkpoint_path)
                 continue
             keep.append(item)
         return keep
@@ -605,6 +606,12 @@ class Train:
                     "selection_rule": validation_selection_rule,
                 }
                 if save_eval or save_best:
+                    best_name_suffix = (
+                        "best"
+                        if validation_selection_rule == "best_validation"
+                        and getattr(self.train_cfg, "keep_only_latest_best_checkpoint", False)
+                        else None
+                    )
                     ckpt_path = self.save_checkpoint(
                         model,
                         model_name,
@@ -618,6 +625,7 @@ class Train:
                         grad_norms=grad_norms,
                         best_valid=best_valid,
                         divergence_count=divergence_count,
+                        name_suffix=best_name_suffix,
                     )
                     if validation_selection_rule == "best_validation":
                         validation_checkpoints = self.prune_previous_best_checkpoint(
@@ -643,9 +651,7 @@ class Train:
                     else None
                 )
                 checkpoint_selection_rule = (
-                    latest_valid["selection_rule"]
-                    if checkpoint_valid_loss is not None
-                    else "periodic_or_final"
+                    "periodic_or_final"
                 )
                 ckpt_path = self.save_checkpoint(
                     model,
@@ -661,12 +667,11 @@ class Train:
                     best_valid=best_valid,
                     divergence_count=divergence_count,
                 )
-                if checkpoint_valid_loss is not None:
-                    if checkpoint_selection_rule == "best_validation":
-                        validation_checkpoints = self.prune_previous_best_checkpoint(
-                            validation_checkpoints,
-                            ckpt_path,
-                        )
+                has_validation_candidate = any(
+                    item["checkpoint_step"] == step
+                    for item in validation_checkpoints
+                )
+                if checkpoint_valid_loss is not None and not has_validation_candidate:
                     validation_checkpoints = self.upsert_checkpoint_candidate(
                         validation_checkpoints,
                         self.checkpoint_metadata(
