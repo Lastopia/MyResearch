@@ -41,6 +41,31 @@ def plot_model_loss_curves(seed_histories, save_path):
     plt.close()
 
 
+def plot_metric_curves(run_histories, metric_key, save_path, ylabel=None, title=None):
+    ensure_dir(Path(save_path).parent)
+    plt.figure(figsize=(9, 5))
+    for label, history in run_histories.items():
+        points = [(row["step"], row[metric_key]) for row in history if metric_key in row]
+        if not points:
+            continue
+        plt.plot(
+            [step for step, _ in points],
+            [value for _, value in points],
+            marker="o" if len(points) <= 20 else None,
+            linewidth=1.5,
+            alpha=0.8,
+            label=label,
+        )
+    plt.xlabel("step")
+    plt.ylabel(ylabel or metric_key)
+    if title:
+        plt.title(title)
+    plt.legend(fontsize=7, ncol=2)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=160)
+    plt.close()
+
+
 def plot_attention_heatmap(attn_matrix, save_path, title=None):
     ensure_dir(Path(save_path).parent)
     matrix = attn_matrix.detach().float().cpu() if isinstance(attn_matrix, torch.Tensor) else attn_matrix

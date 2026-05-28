@@ -27,7 +27,7 @@ from utils import (
 from model import GPTLikeTransformer
 from visualize import (
     plot_loss_curve,
-    plot_model_loss_curves,
+    plot_metric_curves,
 )
 
 
@@ -316,7 +316,7 @@ class Train:
         validation_checkpoints.append(final_checkpoint)
         best_checkpoint = self.best_validation_checkpoint(validation_checkpoints)
         stability = self.stability_metrics(train_losses, grad_norms, divergence_count, elapsed_seconds)
-        if self.train_cfg.run_loss_curve:
+        if self.train_cfg.run_loss_curve and getattr(self.train_cfg, "save_individual_loss_curves", False):
             plot_loss_curve(
                 history,
                 Path(PATH.figure_dir) / f"{model_name}_seed{seed}_loss.png",
@@ -995,12 +995,24 @@ class Train:
     def plot_aggregate_curves(self, serializable):
         if not self.train_cfg.run_loss_curve:
             return
+        histories = {}
         for model_name, seed_items in serializable.items():
-            seed_histories = {seed: item["train_state"]["history"] for seed, item in seed_items.items()}
-            plot_model_loss_curves(
-                seed_histories,
-                Path(PATH.figure_dir) / f"{model_name}_loss_all_seeds.png",
-            )
+            for seed, item in seed_items.items():
+                histories[f"{model_name} seed {seed}"] = item["train_state"]["history"]
+        plot_metric_curves(
+            histories,
+            "train_loss",
+            Path(PATH.figure_dir) / "phase2_train_loss_all_models_seeds.png",
+            ylabel="training loss",
+            title="Phase 2 training loss",
+        )
+        plot_metric_curves(
+            histories,
+            "valid_loss",
+            Path(PATH.figure_dir) / "phase2_valid_loss_all_models_seeds.png",
+            ylabel="validation loss",
+            title="Phase 2 validation loss",
+        )
 
     def summarize_phase3(self, serializable):
         metric_names = ["attn_entropy", "attn_distance", "toeplitz_deviation"]

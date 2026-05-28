@@ -22,7 +22,7 @@ from utils import (
     valid_torch_checkpoint,
     write_csv,
 )
-from visualize import plot_sae_health_curves, plot_sae_training_curves
+from visualize import plot_metric_curves, plot_sae_health_curves, plot_sae_training_curves
 
 
 class TopKSAE(nn.Module):
@@ -349,20 +349,21 @@ class SelfSAE:
             f"ev={metrics['explained_variance']:.4f} dead={metrics['dead_feature_rate']:.4f}"
         )
 
-        figure_prefix = (
-            f"{model_name}_modelseed{model_seed}_"
-            f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}"
-        )
-        plot_sae_training_curves(
-            history,
-            Path(PATH.figure_dir) / f"{figure_prefix}_sae_mse.png",
-            title=f"{model_name} seed {model_seed} L{layer} SAE MSE",
-        )
-        plot_sae_health_curves(
-            history,
-            Path(PATH.figure_dir) / f"{figure_prefix}_sae_health.png",
-            title=f"{model_name} seed {model_seed} L{layer} SAE health",
-        )
+        if getattr(self.sae_cfg, "save_individual_sae_curves", False):
+            figure_prefix = (
+                f"{model_name}_modelseed{model_seed}_"
+                f"saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}"
+            )
+            plot_sae_training_curves(
+                history,
+                Path(PATH.figure_dir) / f"{figure_prefix}_sae_mse.png",
+                title=f"{model_name} seed {model_seed} L{layer} SAE MSE",
+            )
+            plot_sae_health_curves(
+                history,
+                Path(PATH.figure_dir) / f"{figure_prefix}_sae_health.png",
+                title=f"{model_name} seed {model_seed} L{layer} SAE health",
+            )
 
         return {
             "sae": sae,
@@ -466,6 +467,38 @@ class SelfSAE:
             summary_rows.append(row)
         return summary_rows
 
+    def plot_aggregate_curves(self, serializable):
+        if not getattr(self.sae_cfg, "run_aggregate_sae_curves", True):
+            return
+        histories = {}
+        for model_name, seed_items in serializable.items():
+            for model_seed, layer_items in seed_items.items():
+                for layer, items in layer_items.items():
+                    for item in items:
+                        meta = item["meta"]
+                        history = item.get("metrics", {}).get("history", [])
+                        if not history:
+                            continue
+                        label = (
+                            f"{model_name} mseed {model_seed} L{layer} "
+                            f"sae {meta['sae_seed']} dict {meta['dict_size']} k {meta['k']}"
+                        )
+                        histories[label] = history
+        metric_specs = [
+            ("train_mse", "SAE train MSE"),
+            ("valid_mse", "SAE validation MSE"),
+            ("explained_variance", "SAE explained variance"),
+            ("dead_feature_rate", "SAE dead feature rate"),
+        ]
+        for metric_key, title in metric_specs:
+            plot_metric_curves(
+                histories,
+                metric_key,
+                Path(PATH.figure_dir) / f"phase4a_{metric_key}_all_models_layers_seeds.png",
+                ylabel=metric_key,
+                title=title,
+            )
+
     def run(self):
         self.logger.log_stage_start(
             f"SAE stage models={list(self.train_res.keys())} layers={list(self.sae_cfg.layers)} "
@@ -553,6 +586,7 @@ class SelfSAE:
         save_json(serializable, Path(PATH.raw_metrics_dir) / "sae_res.json")
         rows = self.flatten_rows(serializable)
         summary_rows = self.summarize_rows(rows)
+        self.plot_aggregate_curves(serializable)
         write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
         write_csv(
             summary_rows,
