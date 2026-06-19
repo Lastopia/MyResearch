@@ -53,7 +53,7 @@ DATA = SimpleNamespace(
 MODEL = SimpleNamespace(
     # GPT-2 small shape trained from scratch. "std" is fixed sinusoidal PE;
     # "rope"/"pope" rotate Q/K.
-    model_names=["rope", "pope"], # 暂时先不加"std"了
+    model_names=["std", "rope", "pope"],
     baseline_model_name="rope",
     run_model_checks=True,
     max_parameter_ratio_delta=0.01,
@@ -100,8 +100,8 @@ TRAIN = SimpleNamespace(
     save_final_optimizer=True,
     skip_completed_runs=True,
     resume_from_checkpoint=True,
-    run_phase3_analysis=False,
-    run_phase3_on_final_checkpoint_skip=False,
+    run_phase3_analysis=True,
+    run_phase3_on_final_checkpoint_skip=True,
     run_length_extrapolation=False,
     extrapolation_seq_lens=[2048],
     run_position_synthetic_task=False,
@@ -115,8 +115,8 @@ TRAIN = SimpleNamespace(
     representative_layers=[1, 6, 10],
     representative_heads=[0, 1, 2, 3],
     max_heatmap_seq_len=128,
-    run_attention_heatmaps=False,
-    run_spectral_plots=False,
+    run_attention_heatmaps=True,
+    run_spectral_plots=True,
     run_attn_entropy=True,
     run_attn_distance=True,
     run_sv_distribution=True,
@@ -168,16 +168,15 @@ EVAL = SimpleNamespace(
     feature_activation_bins=10,
     selectivity_quantile=0.9,
     correlation_feature_sample=512,
-    run_top_token_identity=False,
+    run_top_token_identity=True,
     skip_completed_stage=True,
 )
 
 INTERP = SimpleNamespace(
-    # Phase 6 defaults to dry-run so prompt/record formats can be checked before
-    # spending OpenAI calls. Set dry_run=False only for selected final samples.
+    # Real interpretation run. Requires OPENAI_API_KEY in .env.
     provider="openai",
     model="gpt-4o-mini",
-    dry_run=True,
+    dry_run=False,
     layers=[2, 6, 10],
     model_seeds=[42],
     max_features_per_model_layer=20,
@@ -188,7 +187,7 @@ INTERP = SimpleNamespace(
     active_threshold=0.0,
     max_tokens=700,
     temperature=0.0,
-    skip_completed_stage=True,
+    skip_completed_stage=False,
 )
 
 

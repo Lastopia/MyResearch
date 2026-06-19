@@ -1,0 +1,663 @@
+                                     Yutong Zhang z5526932
+
+
+ 1. Literature Review
+1.1 SAE Interpretability
+In recent years, Sparse Autoencoders (SAEs) have emerged as a key tool for enhancing the
+interpretability of large models (Cunningham et al., 2023; Klindt et al., 2025). Their core idea
+is to decompose highly superimposed, polysemantic features in fixed Transformer
+representations into a set of monosemantic basis vectors via sparse reconstruction, thereby
+creating a human-interpretable "feature-concept" dictionary.
+
+SAE demonstrates direct practical value in steering scenarios. Existing work shows that
+steering vectors constructed from SAE features can effectively modulate model behavior—
+without requiring additional supervisory data—for tasks such as safety alignment, role
+control, and reasoning path intervention (Arad et al., 2025; Chalnev et al., 2024; Wang et al.,
+2025). Compared to traditional fine-tuning or RLHF methods, this approach offers greater
+controllability and interpretability. Meanwhile, SAE concepts have been extended to
+multimodal and vision-language models to decompose representational structures in vision-
+content joint spaces (Pach et al., 2025). These advances collectively indicate that improving
+SAE decomposition quality is not only an interpretability challenge but also directly
+determines the upper bound of model controllability.
+
+To achieve this goal, existing research predominantly focus on refining SAE architectures
+themselves, such as Gated SAEs (Rajamanoharan et al., 2024), Top-K SAEs (Gao et al.,
+2024), and Routed SAEs (Shi et al., 2025). These approaches enhance feature selection
+through gating, sparse selection, or dynamic routing mechanisms. Fundamentally, this
+direction improves SAEs' fitting capacity to pre-existing representations. However, a
+relatively underexplored avenue involves starting from the Transformer’s representation
+generation mechanism itself to make it suitable for posterior sparse decomposition.
+
+What-where decoupling is one approach to make sparse decompositions more suitable for
+posterior analysis (O’Neill et al., 2024). Chughtai et al. (2024) found that in the early layers of
+GPT-2 small ( specifically, the residual stream at layer 0 ), positional and content features
+are almost completely decoupled. In this stage, sparse autoencoders (SAEs) can clearly
+recover the one-dimensional structure corresponding to positional encodings in the latent
+space, such as helical or periodic patterns. However, as depth increases, what-where
+decoupling rapidly deteriorates: positional information and semantic content are
+progressively superimposed within the residual stream, forming highly entangled
+representations, alongside more pronounced superposition and polysyntheticity
+(Cunningham et al., 2023; Klindt et al., 2025). In these deeper layers, SAEs typically require
+substantially larger dictionary sizes, stronger sparsity constraints, and even more
+sophisticated post-alignment strategies to recover interpretable features (Karvonen et al.,
+2025; Minegishi et al., 2025).
+
+However, it is crucial to emphasize that the entanglement between positional and content
+representations serves important purposes. Existing research shows that what-where
+entanglement is a key source of the model's expressive power. Bricken et al. (2023) argue
+that in finite-dimensional representation spaces, models inevitably rely on superposition—
+where different factors share representational subspaces—to efficiently encode numerous
+semantic features. Similarly, Su et al. (2021) demonstrate that appropriate positional-content
+coupling is essential for complex reasoning tasks. Thus, simply pursuing complete
+decoupling may compromise model performance.
+
+Notably, different positional encoding methods will lead to different what-where entanglement
+pattern that significantly alter the spectral structure of attention logits (e.g., singular value
+distributions and approximate Toeplitz properties), thereby influencing information mixing
+patterns (Gu et al., 2025). For instance, multiplicative positional encodings like RoPE induce
+a degree of "spectral shrinkage," resulting in smoother attention patterns that enhance
+training stability and generalization performance. However, this smoothing can also enhance
+what-where entanglement, making posterior decomposition more challenging. In other
+words, by modifying the RoPE design, we can modulate what-where entanglement to
+optimize attention patterns—preserving RoPE's advantages while maximizing interpretability
+for posterior decomposition.
+
+The need to balance detanglement and entanglement also becomes important in multimodal
+scenarios. In computer vision, spatial position is a prerequisite for content —pixel topology
+errors disrupt geometric relationships, so visual encoding must preserve tight entanglement
+between spatial structure and content representations (Yao et al., 2025; Chen et al., 2025).
+In contrast, positional information in LLMs exhibits greater independence: the semantics of
+the same token vary little across positions ( Devlin et al., 2019 ). This endows language
+features with inherent decoupling potential. Multimodal models, however, face dual
+challenges: fine-grained alignment between local visual regions and textual descriptions, and
+architectural coordination between textual priors and visual positional encodings (Li et al.,
+2025; Huang et al., 2025).
+
+This naturally leads to an appealing idea: if positional-content entanglement has an invertible
+structure, we could construct an exact bijection to transform entangled representations into
+decoupled ones without losing expressive power. This approach is formally analogous to
+normalizing flows, which achieve lossless separation of latent variables through invertible
+transformations (Kobyzev et al., 2019; Kingma & Dhariwal, 2018).
+
+However, this idea is difficult to realize within the Transformer framework. First, multi-layer
+residual structures fundamentally perform information compression and redistribution rather
+than strict information preservation (Elhage et al., 2022). Second, superposition represents
+irreversible feature overlap in low-dimensional spaces, where distinct semantic factors
+exhibit lossy overlapping in their representations (Olah et al., 2020; Bricken et al., 2023).
+Thus, positional-content entanglement in Transformers is inherently an irreversible mixture
+encoding. From this perspective, the true role of SAEs is to perform approximate sparse
+decomposition of mixed features within the given representation space, rather than strict
+factor decoupling (Cunningham et al., 2023; Gao et al., 2024). This suggests that, instead of
+pursuing theoretically infeasible complete reversible decoupling, a more practical direction is
+to develop sparsity-optimized decomposition strategies.
+
+In other words, our goal is not to eliminate entanglement, but to reshape it: enabling
+representations that maintain model performance while achieving both efficient compression
+and posterior separability. By optimizing Transformer positional encodings, we can engineer
+positional-content coupling with more regular statistical structure, thereby reducing the
+difficulty of SAE-based approximate decoupling.
+
+1.2 Positional Encoding
+Current Transformer positional encoding schemes are rich and diverse, including Sinusoidal
+PE (Vaswani et al., 2017), Learned PE (Devlin et al., 2018; Dosovitskiy et al., 2020), T5-style
+relative biases (Raffel et al., 2020), ALiBi (Press et al., 2021), and RoPE (Su et al., 2021).
+RoPE, due to its excellent length extrapolation capability and training stability, has become
+the mainstream choice for SAE analysis (Cunningham et al., 2023; Gu et al., 2025; Zhang et
+al., 2026).
+
+Mechanistically, RoPE achieves multiplicative positional-content coupling through complex-
+plane rotations, producing approximately Toeplitz attention patterns and exhibiting spectral
+contraction effects (Wang et al., 2025). This results in smoother attention distributions,
+enhancing training stability and positional generalization. Empirical studies also reveal clear
+functional differentiation among attention heads in RoPE models: some heads specialize in
+content matching, while others are more sensitive to relative positions (Gu et al., 2025).
+
+However, this "functional differentiation" does not equate to true representational decoupling.
+RoPE implicitly embeds positional information through phase rotations, leaving position and
+semantics highly entangled in the representation space (Wang et al., 2025). Analyses show
+that RoPE's improvements primarily manifest in smoother mixing patterns, rather than
+fundamentally separating "what (content)" from "where (position)" (Gopalakrishnan et al.,
+2025).Thus, PoPE (Gopalakrishnan et al., 2025) proposes a more radical improvement: in
+polar coordinates, it explicitly decouples magnitude (content) from phase (position),
+structurally eliminating the what-where confound. Unlike RoPE's implicit coupling, PoPE
+maps the two to orthogonal geometric degrees of freedom, achieving clear division at the
+representation level.
+
+Empirical validation shows that PoPE's structural adjustments not only preserve most of
+performance but deliver systematic improvements across position-sensitive tasks (perplexity,
+downstream metrics, zero-shot length extrapolation), consistently across model scales
+(124M–774M) (Gopalakrishnan et al., 2025). This indirectly confirms that redesigning
+positional-content coupling is both feasible and beneficial. However, the interaction
+mechanism between PoPE and SAEs remains unclear. Existing SAE research (Cunningham
+et al., 2023; Klindt et al., 2025) treats positional encodings as fixed background, overlooking
+their potential as key variables for interpretability. A critical question remains unanswered:
+how does SAE decomposition behavior respond when the entanglement structure of
+underlying representations is altered through positional encoding changes?
+
+From prior analysis, SAE decomposition of lossy mixture representations critically depends
+on feature separability. Thus, PoPE's structural decoupling is expected to significantly
+reduce SAE training difficulty, yielding:
+
+    Improved feature monosemanticity
+    Reduced reliance on large dictionaries and strong regularization
+    Enhanced steering effectiveness
+    Meanwhile, SAE benchmarks (Karvonen et al., 2025) provide quantitative evaluation
+    metrics. This paper therefore conducts the first systematic study of SAE performance
+    under PoPE vs. RoPE, verifying whether positional encoding design—through
+    decoupling positional and content features—can enhance interpretability while
+    maintaining task performance.
+
+ 2. Theoretical Investigations
+Unlike computer vision, natural language exhibits the property of translation invariance: the
+core semantic meaning of a word generally remains consistent regardless of its position
+within a sentence. This suggests that Large Language Models (LLMs) should prioritize
+capturing relative positional dependencies over fixed absolute positions.
+
+Both ALiBi and RoPE aim to eliminate the dependency on absolute positions within the
+attention mechanism, ensuring that attention scores are primarily driven by the relative
+relationships between tokens. While ALiBi achieves this via translational bias (applying linear
+penalties based on distance to the attention scores), RoPE employs rotational
+transformation (embedding relative position information directly into the vector space through
+geometric rotation). Unlike the original Transformer's sinusoidal positional encoding, which
+lacks an explicit mechanism for modeling relative distances, these approaches enable
+attention scores to be a function of the distance between tokens. This reliance on relative
+positioning is essential for improving long-range dependency modeling and is a key factor
+enabling the impressive length extrapolation capabilities observed in modern LLMs.
+
+The primary limitation of RoPE lies in its implementation within the Cartesian coordinate
+system, where the 'what' (semantic content) and the 'where' (positional information) become
+inherently entangled through the rotation matrix operation. When calculating Query-Key
+matches, the model often struggles to disentangle whether the attention score is derived
+from semantic similarity or positional alignment. The derivation of RoPE is as follows:
+
+ 1. We get word embedding input x with d dimensions in position p.
+        p        p    p        p
+    x       = [x , x , . . . , x ]
+                 1    2        d
+
+
+ 2. Then, split it into 2D vector.
+        p         p   p   p          p           p          p              p
+    x       = (x , x , x , . . . . . x ) => (x         ,x         ,....x           )
+                  1   2   3          d           1:2        3:4            d−1:d
+ 3. We apply Rotation matrix R for every group. The i                  θ                                     th
+                                                                                                                  group is as follow:
+           p                                      p                                                                p
+       q 2i−1                                 x 2i−1                   cos(pθ i )        − sin(pθ i )             x 2i−1
+   (                ) = Rθ (                              ) = (                                            )(              )
+                p                                     p                                                                p
+           q 2i                                   x 2i                 sin(pθ i )            cos(pθ i )            x 2i
+
+                                 −2(i−1)/d
+   θ i = 10000
+
+ 4. We make it complex form. ^i means imaginary number. The i                                                                  th   pair of dimension is:
+       p             p                   p                                               p        p           p
+   x i = (x 2i−1 , x 2i ) => (complex f orm)C i                                              = x 2i−1 + ^
+                                                                                                        ix 2i
+
+
+ 5. According to Euler's formula: e                                            ^
+                                                                               iθ
+                                                                                    = cosθ + ^
+                                                                                             isinθ        , we can represent the the after rotation
+   i th        pair as a complex multiplication:
+           ′
+       p                 p            ^
+                                      ipθ i
+   Ci           = Ci ⋅ e
+
+
+ 6. Matrix R could be regarded as ratotating degree θ in complex space. The ratation
+                         θ
+
+
+    parameter in complex soace is:
+    ^
+               = cosθ + ^
+    iθ
+   e                    isinθ
+
+ 7. Expanding formula in part 3, we can get:
+       p                     p                p                 p
+   q                +^
+                     iq           = (x                    +^
+                                                           ix        ) ⋅ (cos(pθ i ) + ^
+                                                                                       i sin(pθ i ))
+       2i−1                  2i               2i−1              2i
+
+
+ 8. If complex a + ^ib = c + ^id, then a = c, b = d, so can we obtain the rotated components:
+       p                  p                                     p
+   q 2i−1 = x 2i−1 cos(pθ i ) − x 2i sin(pθ i )
+               p          p                                p
+           q        = x           sin(pθ i ) + x                cos(pθ i )
+               2i         2i                               2i
+
+
+   where, x represent what, pθ represent where, indicating “what - where” entanglement.
+                         p
+
+                         2i                                                i
+
+
+   this will lead to:
+               Semantic Contamination: When performing attention calculations, the model must
+               essentially 'undo' the rotation to extract the underlying semantic information and
+               recover the original token embedding 𝑥. While theoretically trivial, this reversal
+               process becomes computationally non-trivial as dimensionality scales; the model
+               incurs additional overhead to disentangle the intertwined semantic and positional
+               features.
+               Informational Redundancy: Positional information persists as a persistent
+               'perturbation' across every dimension of the vector. During the computation of Query-
+               Key dot products, this introduces significant 'noise'—irrelevant to semantic matching
+               —that is purely positional in nature, thereby cluttering the attention scores with
+               extraneous signals."
+
+PoPE represents each scalar channel as a complex number in polar form, where
+the magnitude carries content and the phase carries position.
+
+ 1. We get word embedding input x with d dimensions at position p :
+       p             p            p                p
+   x       = [x , x , … , x ]
+                     1            2                d
+
+
+ 2. Unlike RoPE, PoPE does not group every two dimensions into a 2D Cartesian vector.
+    Instead, it treats each scalar feature as one channel and converts it into the magnitude of
+   a complex number :
+       p             p            p                p
+   x       = [x , x , … , x ]
+                     1            2                d
+
+
+ 3. PoPE maps each scalar channel into a non-negative magnitude using the softplus
+    function σ(x) = ln(1 + e ), which allows that value to be interpreted as a magnitude in
+                                                                x
+   polar coordinates. μ means magnitude.
+                                                 p
+       p            p                        x
+   μ       = σ(x ) = ln(1 + e                    i
+                                                     )
+       i            i
+
+
+ 4. PoPE assigns position only to the phase. For the i           th
+                                                                      channel, the phase is determined
+   purely by the token position p and the channel frequency θ ​, so content no longer shifts
+                                                                           i
+
+
+   the phase. ϕ means phase
+       p
+   ϕ       = pθ i
+       i
+
+
+   θi = θ
+              (i−1)/d
+                             ( θ usually use 10000 )
+ 5. Now each channel is written directly in polar-complex form. Its magnitude μ ​stores    p
+
+                                                                                           i
+
+
+   content, and its phase ϕ ​stores position
+                                                         p
+
+                                                         i
+                         p
+       p       p    ^
+                    iϕ           p   ^
+                                     ipθ i
+   q       = μ e         i
+                             = μ e
+       i       i                 i
+
+
+ 6. According to Euler's formula, the complex number can be expanded into Cartesian
+   coordinates, but unlike RoPE, this expansion starts from a magnitude-phase
+   representation rather than from a 2D semantic pair
+    ^
+           = cos θ + ^
+    iθ
+   e                 i sin θ
+
+       p       p
+   q       = μ ( cos(pθ i ) + ^
+                              i sin(pθ i ))
+       i       i
+
+
+   If we write the real and imaginary parts explicitly, they are obtained from the same
+   magnitude μ and the same position phase pθ . This is the key structural difference from
+                             p
+
+                             i                               i
+
+
+   RoPE: the semantic quantity enters only through the magnitude, not through the phase
+   offset.
+
+Although PoPE elegantly disentangles the 'what' and 'where' components, it introduces
+several limitations compared to RoPE:
+
+   Lack of Hardware/Kernel Compatibility: RoPE is deeply integrated into the current
+   software ecosystem. Mainstream attention kernels (e.g., FlashAttention) are highly
+   optimized for the RoPE-based rotation operator. Transitioning to PoPE would necessitate
+   the development of custom, hardware-optimized kernels, resulting in significant
+   deployment and integration costs.
+   Computational Overhead: The requirement for per-channel non-linear activation (e.g.,
+   Softplus) introduces extra arithmetic operations for every token. While seemingly
+   marginal, this increases the computational burden on the GPU's arithmetic logic units
+   during the attention forward/backward pass.
+   Over-constrained Inductive Bias: PoPE’s strict decoupling of content and position may
+   be counter-productive in complex reasoning tasks. By imposing a rigid geometric
+   separation, the model may be deprived of subtle what-where interactions that are often
+   essential for high-level semantic reasoning, potentially creating an 'upper bound' on
+   performance in tasks requiring intricate logic. And that's what I want to make a
+   difference.
+
+ 3. Problem Definition
+RQ1: Performance Stability
+Does PoPE outperform RoPE in language model training and downstream tasks?
+RQ2: Decoupling Effectiveness
+Does PoPE achieve stronger content-position decoupling?
+
+RQ3: Interpretability Improvement
+Does PoPE enable SAEs to learn more monosemantic features?
+
+RQ4: Mechanistic Impact
+How does positional encoding affect attention logits' spectral structure (Toeplitz properties)?
+
+Then to conclude:
+Key Hypotheses to Test
+
+ 1. Does what-where disentanglement harm language model training efficiency? If yes,
+   how?
+ 2. Does what-where disentanglement yield purer semantic features in SAE training? If yes,
+    how?
+
+This systematic comparison will clarify PoPE's practical value and inspire future positional
+encoding designs.
+
+ 4. Task Flow in progress
+Phase 1: Model Construction (Weeks 1-3) Completed
+Limited by computing resources, we only train a clean 90M Toy Transformer from scratch
+with switchable RoPE/PoPE implementations to validate pipeline feasibility and test PoPE's
+positional processing hypothesis.
+Remark: I planned to monkey patch Llama model and inject PoPE into it. But
+different PE will lead to very bad performance.
+
+
+  # Data Preparation
+  DATA_CFG = SimpleNamespace(
+      dataset = "wikitext",
+      config = "wikitext-103-raw-v1",
+      key = "text",
+      raw_text_samples = 30000,
+      train_blocks = 1500,
+      valid_blocks = 300,
+      seq_len = 1024,
+      tokenizer = "gpt2",
+      eos_join = False,
+      seed = 42,
+  )
+
+  DATA_RES = {
+      vocab_size = 50257,
+      total_token_used = 1891328,
+      raw_text = 30000,
+      non_empty_texts = 19357,
+         used_texts = 14926,
+  }
+
+
+  # Model Construction
+  MODEL_CFG = SimpleNamespace(
+      n_layers = 12,
+      d_embed = 512,
+      n_heads = 8,
+      d_ff = 2048,
+      dropout = 0.1,
+      seq_len = DATA_CFG.seq_len,
+      # Extrapolation test is not being considered at this time.
+      lr = 3e-5,
+      vocab_size = DATA_RES["vocab_size"]
+  )
+
+  MODEL_RES = {
+      RoPE_para = 89343057, # about 90M
+      PoPE_para = 89346129, # about 90M
+  }
+
+
+Phase 2: Train & Evaluate (week3-6) Completed
+
+      Stability Analysis: Compare training loss curves and gradient stability between the two
+      architectures.
+      Performance Evaluation: Benchmark models on language modeling (perplexity) and
+      zero-shot length extrapolation tasks.
+
+
+  TRAIN = SimpleNamespace (
+      steps = 70000, #2000比较好
+      batch_size = 24,
+      seq_len = MODEL.seq_len,
+      save_interval = 10000,
+      log_interval = 200,
+      data_type = "bfloat16",
+      warmup = 2000
+  )
+Loss Curve:
+ 1. attn_entropy: Compute the Shannon entropy of each query’s attention distribution by
+    treating its normalized attention weights over all keys as a probability distribution. A lower
+   entropy indicates that attention is more concentrated on a few positions, while a higher
+   entropy indicates a more dispersed attention pattern.
+               N
+   H = −∑            a i loga i
+               i=1
+
+
+   ai   is the attention weight at position i, N is the number of tokens paid attention to.
+ 2. avg_attn_distance: Compute the attention-weighted average token distance, which
+    reflects the model’s average contextual span. A larger value indicates a stronger
+    preference for long-range dependencies, whereas a smaller value indicates a stronger
+    preference for local dependencies.
+                       N
+   Distance = ∑ i=1 a i d i
+
+   di   is the distance between query word and the key word
+ 3. attn_heatmap: High responses near the diagonal usually indicate that the model tends to
+    focus more on adjacent or nearby tokens.
+
+
+
+
+Phase 3: SAE Training & Core Metrics (Weeks 6-8) Partly Completed
+Train SAEs ( not top-k SAE) with identical configurations on matched RoPE/PoPE models
+across early/mid/late layers. Collect metrics as follow:
+
+   Reconstruction Error
+   L0 Norm
+   Dead Features
+
+
+  SAE_CFG = SimpleNamespace(
+      activation layer = "residual after block"
+      dictionary size = 4096
+      L1 coefficient = 1e-2
+      epochs = 400
+      learning rate = 2e-3
+      batch size = 2048
+      validation row cap = 8192 # sampling size of SAE validation set affects
+  stability of MSE/nz.
+  )
+ Model                   Val MSE                       L0-Norm rate
+ RoPE                    0.0261                        8.59%
+ PoPE                    0.0216                        6.59%
+
+
+From the current simple metrics, PoPE shows relatively low ValMSE and L0-Norm, which to
+some extent supports our hypothesis.
+
+
+
+
+   Correlation: measures the degree of linear relationship between features; lower values
+   indicate weaker linear entanglement.
+   Mutual Information: measures the mutual information between features; lower values
+   indicate weaker nonlinear dependence and a greater degree of independence.
+
+Phase 4: Disentanglement Benchmark (Weeks 9-11) Partly Completed
+Accoding to Bilal Chughtai et al. (2024), we use the Disentanglement Probe test, there are
+several important metrics as follow:
+
+     2
+   R tok  : Indicates how single SAE feature could predict the semantic
+     2
+   R pos   : Indicates how single SAE feature could predict the position
+
+
+
+
+Phase 5: LLM-Assisted SAE Latent Interpretation (Weeks 11-13) Partly Completed
+After each TopK-SAE training run, we use GPT-4o to automatically interpret all SAE latents
+and use the outputs as a quantitative measure of interpretability. Specifically, for each latent,
+we provide approximately 100–200 activation contexts together with their activation
+strengths and token positions, then use a fixed prompt to have GPT-4o generate a brief
+natural-language explanation of its activation pattern. Each latent is evaluated three times
+and the results are averaged to reduce randomness. The GPT-4o outputs are then used to
+assess the interpretation quality of each latent along the following three dimensions:
+
+ 1. Monosemanticity: whether the latent corresponds to a single, clear concept.
+ 2. Low-level vs. high-level feature type: whether the latent is more oriented toward low-level
+   syntax, punctuation, or part-of-speech features versus high-level semantics, topics, or
+   intents.
+ 3. Explaination examples: whether the examples are representative enough to cover
+    activation patterns across multiple different contexts.
+    Mainly refer work of Paulo et al., (2024) and Shi et al., (2025). Output samples are as
+   follow:
+
+
+  gpt-4o interpret result:
+      AVG Monosemanticity Score: 3.95/5.00
+      AVG Low-level Features Score: 4.14/5.00
+      AVG High-level Features Score: 4.57/5.00
+      API Cost: $0.4261
+  Examples of Interpreted Features:
+      Feature #5: low-level (Score:5) - The activations are consistently
+  associated with relative pronouns "which" and "that," indicating a ...
+      Feature #15: low-level (Score:4) - The activations are consistently
+  associated with punctuation marks, particularly those used in dialo...
+      Feature #23: low-level (Score:4) - The activations are consistently
+  associated with the token "than," which suggests a pattern related ...
+
+
+I have also started using GPT-4o to help interpret features, but the code for a rigorous
+quantitative evaluation is not yet complete, so for now I will only present the following cases.
+
+ 5. Future Task flow
+Phase 6: Strengthening Experimental Reliability (Weeks 13-16)
+
+ 1. Expand the experiments to larger datasets in contexts of varying complexity to test if
+    what-where disentanglement will affect the learning ability in complex context?
+ 2. Validate the results across multiple random seeds.
+ 3. Introduce additional dynamic monitoring metrics to track representational changes,
+    including:
+       SAE feature reuse rate
+       Monosemanticity growth
+       Dead feature evolution
+
+Phase 7: Steering and Causal Intervention (Weeks 16-20)
+The final phase evaluates the practical utility of the disentangled features. We will construct
+steering vectors from SAE features to intervene in model behavior, such as controlling
+safety-related or stylistic outputs. We hypothesize that steering vectors derived from PoPE-
+based SAEs will achieve higher precision and fewer unintended side effects, due to the
+cleaner underlying feature space.
+
+Phase 8: New Positional Embedding Design (Exploratory)
+The insights from the preceding analyses may guide the design of a new positional
+embedding scheme that preserves strong representational capacity during learning while
+remaining more amenable to approximate decoupling in SAE analysis. Or combine different
+what-where extent, using different positional encoding for different head. (It's still just an
+imagination up to now; its feasibility hasn't been verified.)
+
+I guess it may be helpful for multimodal tasks. But I need to read more and
+test more to verify my conjecture
+
+ 6. Risk Mitigation
+A potential risk is the trade-off between strict disentanglement and model expressivity.
+Should PoPE show performance degradation in complex reasoning tasks, we will investigate
+hybrid coupling strategies or partial disentanglement to strike an optimal balance between
+interpretability and model capacity.
+
+ 7. Conclusion
+This research project re-conceptualizes mechanistic interpretability not merely as a posterior
+analysis task, but as a holistic problem requiring the co-design of model architectures and
+interpretability tools. By demonstrating that PoPE significantly lowers the burden of SAE
+feature decomposition, this work paves the way for more robust and controllable Large
+Language Models and inspire creation of more powerful PE with higher SAE compatibility     。
+ 8. Appendix
+ 1. Cunningham et al., 2023, "Sparse Autoencoders Find Highly Interpretable Features in
+    Language Models"
+ 2. Klindt et al., 2025, "Towards Monosemanticity in Neural Networks"
+ 3. Klindt et al., 2025, “From superposition to sparse codes: interpretable representations in
+    large language models”
+ 4. Arad et al., 2025, “SAEs Are Good for Steering – If You Select the Right Features”
+ 5. Chalnev et al., 2024, “Improving Steering Vectors by Targeting Sparse Autoencoder
+    Features”
+                                                                              ‑
+ 6. Wang et al., 2025, “Improving LLM Reasoning through Interpretable Role Playing
+    Steering (SRPS)”
+ 7. Pach et al., 2025, “Sparse Autoencoders Learn Monosemantic Features in
+          ‑
+    Vision Language Models”
+ 8. Rajamanoharan et al., 2024, "Improving Dictionary Learning with Gated Sparse
+   Autoencoders"
+ 9. Gao et al., 2024, "Scaling and evaluating sparse autoencoders"
+10. Shi et al., 2025, "Route Sparse Autoencoder to Interpret Large Language Models"
+11. O'neill et al., 2024, "Disentangling Dense Embeddings with Sparse Autoencoders"
+12. Chughtai et al., 2024, "Understanding positional features in layer 0 SAEs"
+13. Karvonen et al., 2025, “SAEBench: A Comprehensive Benchmark for Sparse
+    Autoencoders in Language Model Interpretability”
+14. Minegishi et al., 2025, “Rethinking Evaluation of Sparse Autoencoders through the
+        ‑
+    Poly Semantic Evaluation Framework”
+15. Gu et al., 2025, "Unpacking Positional Encoding in Transformers: A Spectral Analysis of
+            ‑
+   Content Position Coupling"
+16. Bricken et al., 2023, "Towards Monosemanticity: Decomposing Language Models via
+    Superposition"
+17. Su et al., 2021, "RoFormer: Enhanced Transformer with Rotary Position Embedding"
+18. Yao et al., 2025, "GeoPE:A Unified Geometric Positional Embedding for Structured
+    Tensors"
+19. Chen et al., 2025, "A 2D Semantic-Aware Position Encoding for Vision Transformers"
+20. Devlin et al., 2018, "BERT: Pre-training of Deep Bidirectional Transformers for Language
+    Understanding"
+21. Vaswani et al., 2017, "Attention Is All You Need"
+22. Li et al., 2025, "LIRA: Inferring Segmentation in Large Multi-modal Models with Local
+    Interleaved Region Assistance"
+23. Huang et al., 2025, "Revisiting Multimodal Positional Encoding in Vision-Language
+    Models"
+24. Kobyzev et al., 2019, "Normalizing Flows: An Introduction and Review of Current
+   Methods"
+25. Kingma & Dhariwal, 2018, "Glow: Generative Flow with Invertible 1x1 Convolutions"
+26. Elhage et al., 2022, "Toy Models of Superposition"
+27. Elhage et al., 2022, "A Mathematical Framework for Transformer Circuits"
+28. Olah et al., 2020, "Zoom In: An Introduction to Circuits"
+29. Devlin et al., 2018, "BERT: Pre-training of Deep Bidirectional Transformers"
+30. Dosovitskiy et al., 2020, "An Image is Worth 16x16 Words"
+31. Raffel et al., 2019, "Exploring the Limits of Transfer Learning with a Unified Text-to-Text
+    Transformer"
+32. Press et al., 2021, "Train Short, Test Long: Attention with Linear Biases Enables Length
+    Extrapolation"
+33. Wang, Guo et al., 2025, "Circle-RoPE: Cone-like Decoupled Rotary Positional
+    Embedding for Large Vision-Language Models"
+34. Gopalakrishnan et al., 2025, "Decoupling the "What" and "Where" With Polar Coordinate
+    Positional Embeddings"
+35. Shen et al., 2025, "VL-SAE: Interpreting and Enhancing Vision-Language Alignment with
+    a Unified Concept Set"
+36. Not cited but may useful Cui et al., 2024, "A phase transition between positional and
+    semantic learning in a solvable model of dot-product attention"
+

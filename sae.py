@@ -467,6 +467,57 @@ class SelfSAE:
             summary_rows.append(row)
         return summary_rows
 
+    def existing_sae_checkpoint_path(self, model_name, model_seed, layer, dict_size, k, sae_seed):
+        return (
+            Path(PATH.ckpt_dir)
+            / "saes"
+            / f"{model_name}_modelseed{model_seed}_saeseed{sae_seed}_layer{layer}_dict{dict_size}_k{k}.pt"
+        )
+
+    def load_existing_sae_item(
+        self,
+        model_name,
+        model_seed,
+        layer,
+        dict_size,
+        k,
+        sae_seed,
+        selected_checkpoint,
+    ):
+        ckpt_path = self.existing_sae_checkpoint_path(model_name, model_seed, layer, dict_size, k, sae_seed)
+        if not valid_torch_checkpoint(ckpt_path):
+            return None
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if "metrics" not in ckpt or "normalization" not in ckpt:
+            return None
+        normalization = ckpt["normalization"]
+        return {
+            "meta": {
+                "model_name": model_name,
+                "model_seed": model_seed,
+                "sae_seed": sae_seed,
+                "layer": layer,
+                "dict_size": dict_size,
+                "k": k,
+                "activation_site": getattr(self.sae_cfg, "activation_site", "residual_post_block"),
+                "activation_normalization": getattr(self.sae_cfg, "normalize_activations", True),
+                "model_checkpoint_rule": selected_checkpoint["selection_rule"],
+                "model_checkpoint_step": selected_checkpoint["checkpoint_step"],
+                "model_checkpoint_path": selected_checkpoint["checkpoint_path"],
+                "model_tokens_seen": selected_checkpoint["tokens_seen"],
+                "train_activation_tokens": getattr(self.sae_cfg, "max_activation_tokens", None),
+                "valid_activation_tokens": getattr(self.sae_cfg, "max_validation_activation_tokens", None),
+            },
+            "metrics": ckpt["metrics"],
+            "normalization_summary": {
+                "mean_abs_mean": normalization["mean"].abs().mean().item(),
+                "std_mean": normalization["std"].mean().item(),
+                "std_min": normalization["std"].min().item(),
+                "std_max": normalization["std"].max().item(),
+            },
+            "checkpoint_path": str(ckpt_path),
+        }
+
     def plot_aggregate_curves(self, serializable):
         if not getattr(self.sae_cfg, "run_aggregate_sae_curves", True):
             return
@@ -529,6 +580,39 @@ class SelfSAE:
                 self.load_model_checkpoint(model, selected_checkpoint)
                 self.logger.log_stage_start(f"SAE model {model_name} seed {model_seed}")
                 for layer in self.sae_cfg.layers:
+                    existing_layer_res = []
+                    missing_existing = False
+                    for dict_size in self.sae_cfg.dictionary_sizes:
+                        for k in self.sae_cfg.topk_values:
+                            for sae_seed in self.sae_cfg.seeds:
+                                item = self.load_existing_sae_item(
+                                    model_name,
+                                    model_seed,
+                                    layer,
+                                    dict_size,
+                                    k,
+                                    sae_seed,
+                                    selected_checkpoint,
+                                )
+                                if item is None:
+                                    missing_existing = True
+                                else:
+                                    existing_layer_res.append(item)
+                    if not missing_existing and existing_layer_res:
+                        self.logger.log_stage_end(
+                            f"SAE reuse existing checkpoints {model_name} seed {model_seed} layer {layer}"
+                        )
+                        sae_res[model_name][model_seed][layer] = existing_layer_res
+                        serializable[model_name][str(model_seed)][str(layer)] = [
+                            {
+                                "meta": item["meta"],
+                                "metrics": item["metrics"],
+                                "normalization_summary": item["normalization_summary"],
+                                "checkpoint_path": item["checkpoint_path"],
+                            }
+                            for item in existing_layer_res
+                        ]
+                        continue
                     self.logger.log_stage_start(f"SAE prepare activations {model_name} seed {model_seed} layer {layer}")
                     train_acts_raw = self.collect_activations(
                         model,

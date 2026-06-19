@@ -142,6 +142,7 @@ class InterpretSAE:
             str(row.get("layer")),
             str(row.get("feature")),
             str(row.get("phase5_label")),
+            str(row.get("run_type") or ("dry_run" if row.get("dry_run") else "openai_run")),
         )
 
     def feature_candidates(self, model_name, model_seed, layer, sae_seed, dict_size):
@@ -416,7 +417,9 @@ class InterpretSAE:
                                 }
                             )
                             items_by_id[blinded] = item
-        summary = self.reporter.summarize(rows) if rows else []
+        current_run_type = "dry_run" if dry_run else "openai_run"
+        current_rows = [row for row in rows if row.get("run_type") == current_run_type]
+        summary = self.reporter.summarize(current_rows) if current_rows else []
         figure_paths = self.reporter.plot_quality_summary(summary)
         result = {
             "phase": "6",
@@ -434,7 +437,8 @@ class InterpretSAE:
                 ],
             },
             "summary_rows": summary,
-            "score_rows": rows,
+            "score_rows": current_rows,
+            "all_score_rows_path": str(Path(PATH.table_dir) / "phase6_interpretation_scores.csv"),
             "figure_paths": figure_paths,
         }
         save_json(result, Path(PATH.raw_metrics_dir) / "phase6_interpretation_summary.json")
@@ -446,8 +450,8 @@ class InterpretSAE:
         ensure_dir(case_path.parent)
         with open(case_path, "w", encoding="utf-8") as f:
             f.write(
-                self.reporter.case_markdown(rows, items_by_id)
-                if rows
+                self.reporter.case_markdown(current_rows, items_by_id)
+                if current_rows
                 else "# Phase 6 Feature Interpretation Cases\n\nNo cases selected.\n"
             )
         save_manifest(self.stage_manifest_path(), "interpret", self.stage_config(), self.stage_outputs())
