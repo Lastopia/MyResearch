@@ -200,6 +200,19 @@ class CausalSelfAttention(nn.Module):
         elif self.position_type not in {"nope", "std", "alibi"}:
             raise ValueError(f"Unknown position type: {self.position_type}")
 
+        if not return_attention and self.alibi is None:
+            dropout_p = self.dropout.p if self.training else 0.0
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=dropout_p,
+                is_causal=True,
+            )
+            y = y.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+            return self.out(y), None, None
+
         logits = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if self.alibi is not None:
             logits = logits + self.alibi(seq_len, logits.dtype, logits.device)

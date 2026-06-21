@@ -18,6 +18,7 @@ from utils import (
     set_seed,
     write_csv,
 )
+from visualize import plot_phase5_summary_figures
 
 
 class Evaluate:
@@ -474,6 +475,7 @@ class Evaluate:
             getattr(self.eval_cfg, "skip_completed_stage", True)
             and manifest_is_current(self.stage_manifest_path(), self.stage_config(), self.stage_outputs())
         ):
+            plot_phase5_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
             return load_json(Path(PATH.raw_metrics_dir) / "eval_res.json")
 
         all_rows, all_feature_rows, nested = [], [], {}
@@ -520,5 +522,6 @@ class Evaluate:
         write_csv(all_rows, Path(PATH.table_dir) / "phase5_disentanglement_runs.csv")
         write_csv(summary, Path(PATH.table_dir) / "phase5_disentanglement_summary.csv")
         write_csv(all_feature_rows, Path(PATH.table_dir) / "phase5_feature_scores.csv")
+        plot_phase5_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
         save_manifest(self.stage_manifest_path(), "eval", self.stage_config(), self.stage_outputs())
         return eval_res

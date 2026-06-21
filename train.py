@@ -26,6 +26,8 @@ from utils import (
 )
 from model import GPTLikeTransformer
 from visualize import (
+    plot_phase3_combined_figures,
+    plot_phase2_summary_figures,
     plot_loss_curve,
     plot_metric_curves,
 )
@@ -92,9 +94,37 @@ class Train:
 
     def stage_config(self):
         return {
-            "train": self.train_cfg,
+            "train": self.train_stage_config(),
             "model": self.model_cfg,
             "data_meta": self.data_res.get("meta", {}),
+        }
+
+    def train_stage_config(self):
+        attention_only = {
+            "analysis_batches",
+            "analysis_batch_size",
+            "run_phase3_analysis",
+            "run_phase3_on_final_checkpoint_skip",
+            "require_final_checkpoints_for_phase3",
+            "local_attention_windows",
+            "long_range_fraction",
+            "spectral_topk_values",
+            "spectral_analysis_layers",
+            "spectral_analysis_heads",
+            "representative_layers",
+            "representative_heads",
+            "max_heatmap_seq_len",
+            "run_attention_heatmaps",
+            "run_spectral_plots",
+            "run_attn_entropy",
+            "run_attn_distance",
+            "run_sv_distribution",
+            "run_toeplitz",
+        }
+        return {
+            key: value
+            for key, value in vars(self.train_cfg).items()
+            if key not in attention_only
         }
 
     def stage_outputs(self):
@@ -102,7 +132,6 @@ class Train:
             Path(PATH.raw_metrics_dir) / "train_res.json",
             Path(PATH.raw_metrics_dir) / "phase2_summary.json",
             Path(PATH.raw_metrics_dir) / "phase2_checkpoint_comparison.json",
-            Path(PATH.raw_metrics_dir) / "phase3_summary.json",
         ]
 
     def stage_manifest_path(self):
@@ -359,12 +388,7 @@ class Train:
                 },
                 "length_sensitivity": self.length_sensitivity_report(),
             },
-            "analysis_res": self.maybe_attention_analysis(
-                model,
-                model_name,
-                seed,
-                reason=analysis_reason,
-            ),
+            "analysis_res": {},
         }
 
     def train_state_from_loaded_checkpoint(
@@ -537,11 +561,6 @@ class Train:
                 seed,
                 loaded_state,
                 elapsed_seconds=0.0,
-            )
-        if getattr(self.train_cfg, "require_final_checkpoints_for_phase3", False):
-            raise FileNotFoundError(
-                f"Final checkpoint required for Phase 3 rerun but not found: "
-                f"model={model_name} seed={seed} step={self.train_cfg.steps}"
             )
         start_step = 0
         train_iter = iter(self.loader("train", shuffle=True))
@@ -1037,6 +1056,14 @@ class Train:
             title="Phase 2 validation loss",
         )
 
+    def plot_phase2_summary_figures(self):
+        if not self.train_cfg.run_loss_curve:
+            return []
+        paths = plot_phase2_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
+        if paths:
+            self.logger.log_stage_end(f"Phase 2 summary figures: wrote {len(paths)} overview files")
+        return paths
+
     def summarize_phase3(self, serializable):
         metric_names = ["attn_entropy", "attn_distance", "toeplitz_deviation"]
         spectral_key = f"spectral_concentration_top{max(getattr(self.train_cfg, 'spectral_topk_values', [8]))}"
@@ -1107,6 +1134,30 @@ class Train:
             Path(PATH.table_dir) / "phase3_taxonomy_counts.csv",
         )
 
+    def plot_phase3_combined_figures(self):
+        if not getattr(self.train_cfg, "run_phase3_analysis", True):
+            return []
+        layers = self.phase3.representative_layers()
+        heads = [
+            head for head in getattr(self.train_cfg, "representative_heads", [0, 1, 2, 3])
+            if 0 <= head < self.model_cfg.n_heads
+        ]
+        spectral_heads = [
+            head for head in getattr(self.train_cfg, "spectral_analysis_heads", heads)
+            if 0 <= head < self.model_cfg.n_heads
+        ]
+        paths = plot_phase3_combined_figures(
+            PATH.figure_dir,
+            model_names=self.model_res["models"].keys(),
+            seeds=self.seeds,
+            layers=layers,
+            representative_heads=heads,
+            spectral_heads=spectral_heads,
+        )
+        if paths:
+            self.logger.log_stage_end(f"Phase 3 combined figures: wrote {len(paths)} overview files")
+        return paths
+
     def run(self):
         if (
             getattr(self.train_cfg, "skip_completed_runs", True)
@@ -1115,6 +1166,7 @@ class Train:
             loaded = self.load_completed_train_res()
             if loaded is not None:
                 self.logger.log_stage_start("skip train stage: existing outputs match config")
+                self.plot_phase2_summary_figures()
                 return loaded
 
         train_res = {}
@@ -1157,9 +1209,6 @@ class Train:
             Path(PATH.raw_metrics_dir) / "phase2_checkpoint_comparison.json",
         )
         self.write_summary_tables(summary)
-        self.plot_aggregate_curves(serializable)
-        phase3_summary = self.summarize_phase3(serializable)
-        save_json(phase3_summary, Path(PATH.raw_metrics_dir) / "phase3_summary.json")
-        self.write_phase3_summary_tables(phase3_summary)
+        self.plot_phase2_summary_figures()
         save_manifest(self.stage_manifest_path(), "train", self.stage_config(), self.stage_outputs())
         return train_res

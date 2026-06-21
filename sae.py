@@ -22,7 +22,12 @@ from utils import (
     valid_torch_checkpoint,
     write_csv,
 )
-from visualize import plot_metric_curves, plot_sae_health_curves, plot_sae_training_curves
+from visualize import (
+    plot_metric_curves,
+    plot_phase4a_summary_figures,
+    plot_sae_health_curves,
+    plot_sae_training_curves,
+)
 
 
 class TopKSAE(nn.Module):
@@ -550,6 +555,14 @@ class SelfSAE:
                 title=title,
             )
 
+    def plot_summary_figures(self):
+        if not getattr(self.sae_cfg, "run_aggregate_sae_curves", True):
+            return []
+        paths = plot_phase4a_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
+        if paths:
+            self.logger.log_stage_end(f"Phase 4a summary figures: wrote {len(paths)} overview files")
+        return paths
+
     def run(self):
         self.logger.log_stage_start(
             f"SAE stage models={list(self.train_res.keys())} layers={list(self.sae_cfg.layers)} "
@@ -563,6 +576,7 @@ class SelfSAE:
             loaded = self.load_completed_sae_res()
             if loaded is not None:
                 self.logger.log_stage_end("skip SAE stage: existing outputs match config")
+                self.plot_summary_figures()
                 return loaded
 
         sae_res = {}
@@ -670,7 +684,6 @@ class SelfSAE:
         save_json(serializable, Path(PATH.raw_metrics_dir) / "sae_res.json")
         rows = self.flatten_rows(serializable)
         summary_rows = self.summarize_rows(rows)
-        self.plot_aggregate_curves(serializable)
         write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
         write_csv(
             summary_rows,
@@ -694,6 +707,7 @@ class SelfSAE:
             },
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
         )
+        self.plot_summary_figures()
         save_manifest(self.stage_manifest_path(), "sae", self.stage_config(), self.stage_outputs())
         self.logger.log_stage_end("SAE stage")
         return sae_res

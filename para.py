@@ -43,8 +43,8 @@ DATA = SimpleNamespace(
     hf_cache_dir="./cache/dataset",
     local_files_only=False,
     seq_len=1024,
-    train_blocks=50000,
-    valid_blocks=5000,
+    train_blocks=20000,
+    valid_blocks=2000,
     streaming=False,
     use_cache=True,
     seed=42,
@@ -53,7 +53,7 @@ DATA = SimpleNamespace(
 MODEL = SimpleNamespace(
     # GPT-2 small shape trained from scratch. "std" is fixed sinusoidal PE;
     # "rope"/"pope" rotate Q/K.
-    model_names=["std", "rope", "pope"],
+    model_names=["rope", "pope", "alibi", "pope_alibi"],
     baseline_model_name="rope",
     run_model_checks=True,
     max_parameter_ratio_delta=0.01,
@@ -66,7 +66,7 @@ MODEL = SimpleNamespace(
     seq_len=1024,
     rope_base=10000.0,
     pope_base=10000.0,
-    pope_type="modify",
+    pope_type="origin",
     tie_embeddings=True,
 )
 
@@ -81,19 +81,19 @@ TRAIN = SimpleNamespace(
     # run_sv_distribution/run_toeplitz/heatmap paths if Phase 3 is killed.
     # representative_* keeps Phase 3 bounded by limiting figure/SVD targets.
     seeds=[42],
-    steps=100000,
+    steps=30000,
     batch_size=8,
     lr=6e-5,
     lr_schedule="cosine",
     min_lr_ratio=0.1,
     weight_decay=0.1,
-    warmup_steps=1000,
+    warmup_steps=500,
     grad_clip=1.0,
     precision="bf16",
     device="cuda",
     log_interval=100,
     eval_interval=5000,
-    save_interval=25000,
+    save_interval=10000,
     analysis_batches=8,
     analysis_batch_size=2,
     loss_spike_threshold=0.5,
@@ -108,7 +108,7 @@ TRAIN = SimpleNamespace(
     save_final_optimizer=True,
     skip_completed_runs=True,
     resume_from_checkpoint=True,
-    require_final_checkpoints_for_phase3=True,
+    require_final_checkpoints_for_phase3=False,
     run_phase3_analysis=True,
     run_phase3_on_final_checkpoint_skip=True,
     run_length_extrapolation=False,

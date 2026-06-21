@@ -1,3 +1,115 @@
+# 命令使用手册
+
+```text
+check gpu
+use gpu 2
+set task name task1
+
+check data result
+check train result
+check attention result
+check sae result
+check eval result
+check interpret result
+
+check data para
+check model para
+check train para
+check attention para
+check sae para
+check eval para
+check interpret para
+check task para
+check all para
+
+run data
+run train
+run attention
+run sae
+run eval
+run interpret
+run all
+
+clear task1 output
+clear task1 models
+clear task1 attention
+clear task1 sae
+```
+
+Task folders:
+
+```text
+set task name task1
+check task para
+```
+
+After `set task name task1`, task-specific outputs are separated into:
+
+```text
+output/task1/
+ckpt/task1/
+```
+
+`cache/` stays shared across tasks, so the same token/data cache is not duplicated.
+
+Switching back is just:
+
+```text
+set task name task1
+```
+
+Then `check ... result` and `run ...` will use that task's existing files.
+
+Clear commands always require an explicit task name:
+
+```text
+clear task1 output
+clear task1 models
+clear task1 attention
+clear task1 sae
+```
+
+`clear task1 output` removes only `output/task1/`. `clear task1 models` removes model checkpoints under `ckpt/task1/models/` and train/attention results under `output/task1/`. `clear task1 sae` removes SAE checkpoints under `ckpt/task1/saes/` and SAE results under `output/task1/`. Shared `cache/` is never cleared by task clear commands.
+
+Copy-paste preset: lightweight formal run:
+
+```text
+set data cfg train_blocks=20000 valid_blocks=2000
+set train cfg steps=30000 batch_size=8 warmup_steps=500 eval_interval=5000 save_interval=10000
+set attention cfg analysis_batches=4 analysis_batch_size=2 run_sv_distribution=true run_toeplitz=false
+set sae cfg steps=1200 max_activation_tokens=32768 max_validation_activation_tokens=8192
+set eval cfg max_probe_train_tokens=4096 max_probe_valid_tokens=2048 probe_steps=100
+check all para
+```
+
+Copy-paste preset: fast trend run:
+
+```text
+set data cfg train_blocks=10000 valid_blocks=1000
+set train cfg steps=20000 batch_size=8 warmup_steps=300 eval_interval=5000 save_interval=10000
+set attention cfg analysis_batches=2 analysis_batch_size=1 run_sv_distribution=false run_toeplitz=false
+set sae cfg steps=800 max_activation_tokens=16384 max_validation_activation_tokens=4096
+set eval cfg max_probe_train_tokens=2048 max_probe_valid_tokens=1024 probe_steps=80
+check all para
+```
+
+Recommended stage order:
+
+```text
+run data
+check data result
+run train
+check train result
+run attention
+check attention result
+run sae
+check sae result
+run eval
+check eval result
+```
+
+`set <stage> cfg key=value ...` only changes mentioned keys. Unknown keys raise an error, and the whole line is applied atomically.
+
 # 常用指令大全
 ```bash
 git fetch --all && git reset --hard origin/main && git clean -fd

@@ -302,7 +302,7 @@ class Phase3AttentionAnalyzer:
                     if head >= attn.size(0):
                         continue
                     matrix = attn[head, :seq_cap, :seq_cap]
-                    path = Path(PATH.figure_dir) / (
+                    path = Path(PATH.figure_dir) / "detail" / "phase3" / (
                         f"{model_name}_seed{seed}_"
                         f"layer{layer}_head{head}_attention_heatmap.png"
                     )
@@ -319,7 +319,7 @@ class Phase3AttentionAnalyzer:
                     if head not in heads:
                         continue
                     head_idx = heads.index(head)
-                    path = Path(PATH.figure_dir) / (
+                    path = Path(PATH.figure_dir) / "detail" / "phase3" / (
                         f"{model_name}_seed{seed}_"
                         f"layer{layer}_head{head}_singular_values.png"
                     )
@@ -337,7 +337,7 @@ class Phase3AttentionAnalyzer:
                 ]:
                     if metric not in layer_metrics:
                         continue
-                    path = Path(PATH.figure_dir) / (
+                    path = Path(PATH.figure_dir) / "detail" / "phase3" / (
                         f"{model_name}_seed{seed}_"
                         f"layer{layer}_{metric}_by_head.png"
                     )
