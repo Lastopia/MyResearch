@@ -43,13 +43,21 @@ class Train:
         self.phase3 = Phase3AttentionAnalyzer(
             train_cfg,
             self.model_cfg,
-            valid_loader=lambda: self.loader("valid", shuffle=False),
+            valid_loader=lambda: self.analysis_loader("valid", shuffle=False),
         )
 
     def loader(self, split, shuffle):
         return DataLoader(
             self.data_res[split],
             batch_size=self.train_cfg.batch_size,
+            shuffle=shuffle,
+            drop_last=True,
+        )
+
+    def analysis_loader(self, split, shuffle):
+        return DataLoader(
+            self.data_res[split],
+            batch_size=getattr(self.train_cfg, "analysis_batch_size", self.train_cfg.batch_size),
             shuffle=shuffle,
             drop_last=True,
         )
@@ -530,6 +538,11 @@ class Train:
                 loaded_state,
                 elapsed_seconds=0.0,
             )
+        if getattr(self.train_cfg, "require_final_checkpoints_for_phase3", False):
+            raise FileNotFoundError(
+                f"Final checkpoint required for Phase 3 rerun but not found: "
+                f"model={model_name} seed={seed} step={self.train_cfg.steps}"
+            )
         start_step = 0
         train_iter = iter(self.loader("train", shuffle=True))
         history = []
@@ -729,7 +742,7 @@ class Train:
         weight = pos - low
         return ordered[low] * (1.0 - weight) + ordered[high] * weight
 
-    def paired_difference_stats(self, per_seed_rows, baseline="rope", target="pope"):
+    def paired_difference_stats(self, per_seed_rows, baseline=None, targets=None):
         metrics = [
             "best_valid_loss",
             "final_valid_loss",
@@ -746,62 +759,72 @@ class Train:
         by_model_seed = {}
         for row in per_seed_rows:
             by_model_seed[(row["model_name"], row["seed"])] = row
-        common_seeds = sorted(
-            {
-                seed for model_name, seed in by_model_seed
-                if model_name == baseline and (target, seed) in by_model_seed
-            }
-        )
+        model_names = list(dict.fromkeys(row["model_name"] for row in per_seed_rows))
+        baseline = baseline or getattr(self.model_cfg, "baseline_model_name", model_names[0] if model_names else "rope")
+        targets = list(targets or [name for name in model_names if name != baseline])
+        comparisons = [(baseline, target) for target in targets]
+        for pope_alibi_name in ("pope_alibi", "pop1_alibi"):
+            if "pope" in model_names and pope_alibi_name in model_names:
+                comparison = ("pope", pope_alibi_name)
+                if comparison not in comparisons:
+                    comparisons.append(comparison)
         rows = []
         rng = random.Random(0)
-        for metric in metrics:
-            differences = []
-            for seed in common_seeds:
-                base_value = by_model_seed[(baseline, seed)].get(metric)
-                target_value = by_model_seed[(target, seed)].get(metric)
-                if base_value is None or target_value is None:
-                    continue
-                if not (math.isfinite(base_value) and math.isfinite(target_value)):
-                    continue
-                differences.append(target_value - base_value)
-            if not differences:
-                rows.append(
-                    {
-                        "comparison": f"{target}_minus_{baseline}",
-                        "metric": metric,
-                        "n_pairs": 0,
-                        "paired_difference_mean": None,
-                        "paired_difference_std": None,
-                        "cohen_dz": None,
-                        "bootstrap_ci95_low": None,
-                        "bootstrap_ci95_high": None,
-                    }
-                )
-                continue
-            mean = sum(differences) / len(differences)
-            if len(differences) > 1:
-                sample_var = sum((value - mean) ** 2 for value in differences) / (len(differences) - 1)
-                sample_std = math.sqrt(sample_var)
-                cohen_dz = mean / sample_std if sample_std > 0 else None
-            else:
-                sample_std = None
-                cohen_dz = None
-            bootstrap_means = []
-            for _ in range(10000):
-                sample = [differences[rng.randrange(len(differences))] for _ in differences]
-                bootstrap_means.append(sum(sample) / len(sample))
-            rows.append(
+        for comparison_baseline, target in comparisons:
+            common_seeds = sorted(
                 {
-                    "comparison": f"{target}_minus_{baseline}",
-                    "metric": metric,
-                    "n_pairs": len(differences),
-                    "paired_difference_mean": mean,
-                    "paired_difference_std": sample_std,
-                    "cohen_dz": cohen_dz,
-                    "bootstrap_ci95_low": self.percentile(bootstrap_means, 0.025),
-                    "bootstrap_ci95_high": self.percentile(bootstrap_means, 0.975),
+                    seed for model_name, seed in by_model_seed
+                    if model_name == comparison_baseline and (target, seed) in by_model_seed
                 }
             )
+            for metric in metrics:
+                differences = []
+                for seed in common_seeds:
+                    base_value = by_model_seed[(comparison_baseline, seed)].get(metric)
+                    target_value = by_model_seed[(target, seed)].get(metric)
+                    if base_value is None or target_value is None:
+                        continue
+                    if not (math.isfinite(base_value) and math.isfinite(target_value)):
+                        continue
+                    differences.append(target_value - base_value)
+                if not differences:
+                    rows.append(
+                        {
+                            "comparison": f"{target}_minus_{comparison_baseline}",
+                            "metric": metric,
+                            "n_pairs": 0,
+                            "paired_difference_mean": None,
+                            "paired_difference_std": None,
+                            "cohen_dz": None,
+                            "bootstrap_ci95_low": None,
+                            "bootstrap_ci95_high": None,
+                        }
+                    )
+                    continue
+                mean = sum(differences) / len(differences)
+                if len(differences) > 1:
+                    sample_var = sum((value - mean) ** 2 for value in differences) / (len(differences) - 1)
+                    sample_std = math.sqrt(sample_var)
+                    cohen_dz = mean / sample_std if sample_std > 0 else None
+                else:
+                    sample_std = None
+                    cohen_dz = None
+                bootstrap_means = []
+                for _ in range(10000):
+                    sample = [differences[rng.randrange(len(differences))] for _ in differences]
+                    bootstrap_means.append(sum(sample) / len(sample))
+                rows.append(
+                    {
+                        "comparison": f"{target}_minus_{comparison_baseline}",
+                        "metric": metric,
+                        "n_pairs": len(differences),
+                        "paired_difference_mean": mean,
+                        "paired_difference_std": sample_std,
+                        "cohen_dz": cohen_dz,
+                        "bootstrap_ci95_low": self.percentile(bootstrap_means, 0.025),
+                        "bootstrap_ci95_high": self.percentile(bootstrap_means, 0.975),
+                    }
+                )
         return rows
 
     def validation_loss_match_target(self, serializable):

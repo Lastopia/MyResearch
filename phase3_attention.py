@@ -131,6 +131,14 @@ class Phase3AttentionAnalyzer:
                     "limited_to_heads": spectral_heads,
                     "reason": "full per-layer per-head SVD at seq_len 1024 is expensive; entropy, distance, local mass, and Toeplitz remain full layer/head metrics",
                 },
+                "oom_killed_diagnosis": (
+                    "If the run prints Killed during Phase 3 while nvidia-smi later shows little memory usage, "
+                    "the likely cause is the Linux OOM killer terminating the Python process during attention "
+                    "analysis. Phase 3 materializes attention weights and raw logits for all layers as "
+                    "batch x heads x seq_len x seq_len; with seq_len=1024 and batch_size=8, these tensors plus "
+                    "SVD/Toeplitz temporaries can exceed host RAM or GPU memory. nvidia-smi is empty afterward "
+                    "because the killed process has already released CUDA memory."
+                ),
             },
         }
         self.write_tables(phase3, model_name, seed)

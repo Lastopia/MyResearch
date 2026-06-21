@@ -21,6 +21,8 @@ python main.py --use-train-scheduler --train-gpus 0,1
 - `std`：standard fixed sinusoidal positional encoding
 - `rope`：RoPE
 - `pope`：PoPE
+- `alibi`：ALiBi-style linear relative-distance bias in attention logits
+- `pope_alibi`：PoPE + ALiBi-style explicit relative routing bias
 
 实验计划和阶段定义见 [Experiment Report.md](./Experiment%20Report.md)。
 
@@ -78,7 +80,7 @@ cache/dataset/tokenizers/gpt2/
 默认主实验模型列表：
 
 ```python
-MODEL.model_names = ["std", "rope", "pope"]
+MODEL.model_names = ["std", "rope", "pope", "alibi", "pope_alibi"]
 TRAIN.seeds = [41, 42, 43]
 ```
 
@@ -117,7 +119,7 @@ python main.py
 默认阶段顺序：
 
 1. `data.py`：加载/缓存数据。
-2. `model.py`：构建 `std / rope / pope` 模型。
+2. `model.py`：构建 `std / rope / pope / alibi / pope_alibi` 模型。
 3. `train.py`：Phase 2 训练评估 + Phase 3 attention 机制分析。
 4. `sae.py`：Phase 4a TopK-SAE。
 5. `eval.py`：Phase 5 disentanglement benchmark。
@@ -271,7 +273,7 @@ OPENAI_API_KEY=sk_your_key
 
 在两张 A100 条件下，建议先跑：
 
-- Phase 2/3：完整 `std / rope / pope × 3 seeds`
+- Phase 2/3：完整 `std / rope / pope / alibi / pope_alibi × 3 seeds`
 - Phase 4a：代表层 `[2, 6, 10]`，固定 dictionary size 和 Top-K
 - Phase 5：限流 probe 和 feature-level 指标
 - Phase 6：先 `dry_run=True`，确认 prompt 和样例格式，再少量 OpenAI-run

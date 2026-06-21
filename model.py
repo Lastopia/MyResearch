@@ -23,12 +23,30 @@ POSITION_ENCODING_REGISTRY = {
         "uses_qk_rotation": True,
         "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
     },
+    "alibi": {
+        "description": "ALiBi adds fixed per-head linear relative-distance bias directly to attention logits.",
+        "uses_qk_rotation": False,
+        "trainable_position_parameters": 0,
+    },
+    "pope_alibi": {
+        "description": "PoPE Q/K phase decoupling plus ALiBi-style explicit relative routing bias in attention logits.",
+        "uses_qk_rotation": True,
+        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
+    },
+    "pop1_alibi": {
+        "description": "Alias for pope_alibi, kept for POP1 + ALiBi experiment naming.",
+        "uses_qk_rotation": True,
+        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
+    },
     "nope": {
         "description": "No explicit position encoding; useful as a diagnostic baseline.",
         "uses_qk_rotation": False,
         "trainable_position_parameters": 0,
     },
 }
+
+POPE_ALIBI_TYPES = {"pope", "pope_alibi", "pop1_alibi"}
+ALIBI_TYPES = {"alibi", "pope_alibi", "pop1_alibi"}
 
 
 def rotate_half(x):
@@ -107,6 +125,35 @@ class PoPEApplier(nn.Module):
         return self._apply_phase(q, self.bias_q), self._apply_phase(k, self.bias_k)
 
 
+class ALiBiBias(nn.Module):
+    def __init__(self, n_heads, max_seq_len):
+        super().__init__()
+        slopes = self._build_slopes(n_heads)
+        positions = torch.arange(max_seq_len)
+        distance = (positions[:, None] - positions[None, :]).clamp(min=0).float()
+        bias = -slopes[:, None, None] * distance[None, :, :]
+        self.register_buffer("bias", bias.unsqueeze(0), persistent=False)
+
+    @staticmethod
+    def _build_slopes(n_heads):
+        def slopes_power_of_2(n):
+            start = 2.0 ** (-(2.0 ** -(math.log2(n) - 3)))
+            ratio = start
+            return [start * (ratio**idx) for idx in range(n)]
+
+        if math.log2(n_heads).is_integer():
+            slopes = slopes_power_of_2(n_heads)
+        else:
+            closest_power = 2 ** math.floor(math.log2(n_heads))
+            slopes = slopes_power_of_2(closest_power)
+            extra = slopes_power_of_2(2 * closest_power)[0::2]
+            slopes.extend(extra[: n_heads - closest_power])
+        return torch.tensor(slopes, dtype=torch.float32)
+
+    def forward(self, seq_len, dtype, device):
+        return self.bias[:, :, :seq_len, :seq_len].to(dtype=dtype, device=device)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, model_cfg, position_type):
         super().__init__()
@@ -121,7 +168,7 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(self.d_model, 3 * self.d_model)
         self.out = nn.Linear(self.d_model, self.d_model)
         self.dropout = nn.Dropout(model_cfg.dropout)
-        base = model_cfg.pope_base if position_type == "pope" else model_cfg.rope_base
+        base = model_cfg.pope_base if position_type in POPE_ALIBI_TYPES else model_cfg.rope_base
         self.rotary = RotaryCache(self.head_dim, model_cfg.seq_len, base)
         self.pope = (
             PoPEApplier(
@@ -131,9 +178,10 @@ class CausalSelfAttention(nn.Module):
                 model_cfg.pope_base,
                 getattr(model_cfg, "pope_type", "modify"),
             )
-            if position_type == "pope"
+            if position_type in POPE_ALIBI_TYPES
             else None
         )
+        self.alibi = ALiBiBias(self.n_heads, model_cfg.seq_len) if position_type in ALIBI_TYPES else None
 
     def forward(self, x, return_attention=False):
         bsz, seq_len, _ = x.shape
@@ -145,14 +193,16 @@ class CausalSelfAttention(nn.Module):
 
         if self.position_type == "rope":
             q, k = self.rotary.rope(q), self.rotary.rope(k)
-        elif self.position_type == "pope":
+        elif self.position_type in POPE_ALIBI_TYPES:
             if self.pope is None:
                 raise RuntimeError("PoPE applier was not initialized")
             q, k = self.pope(q, k)
-        elif self.position_type not in {"nope", "std"}:
+        elif self.position_type not in {"nope", "std", "alibi"}:
             raise ValueError(f"Unknown position type: {self.position_type}")
 
         logits = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if self.alibi is not None:
+            logits = logits + self.alibi(seq_len, logits.dtype, logits.device)
         mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
         logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
         attn = F.softmax(logits.float(), dim=-1).to(v.dtype)
@@ -273,7 +323,7 @@ class SelfTransformer:
         unknown = [name for name in self.model_cfg.model_names if name not in POSITION_ENCODING_REGISTRY]
         if unknown:
             raise ValueError(f"Unknown model_names: {unknown}")
-        if "pope" in self.model_cfg.model_names and self.head_dim % 2 != 0:
+        if any(name in POPE_ALIBI_TYPES for name in self.model_cfg.model_names) and self.head_dim % 2 != 0:
             raise ValueError(f"PoPE requires an even head_dim, got {self.head_dim}")
 
     def build_model(self, model_name):
@@ -283,10 +333,12 @@ class SelfTransformer:
 
     def position_meta(self, model_name):
         meta = dict(POSITION_ENCODING_REGISTRY[model_name])
-        if model_name == "pope":
+        if model_name in POPE_ALIBI_TYPES:
             meta["trainable_position_parameters"] = (
                 2 * self.model_cfg.n_layers * self.model_cfg.n_heads * (self.head_dim // 2)
             )
+        if model_name in ALIBI_TYPES:
+            meta["alibi_bias_parameters"] = 0
         return meta
 
     def architecture_signature(self):

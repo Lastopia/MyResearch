@@ -72,7 +72,14 @@ MODEL = SimpleNamespace(
 
 TRAIN = SimpleNamespace(
     # Phase 2 training settings plus Phase 3 attention-analysis limits.
-    # representative_* keeps Phase 3 affordable on two A100s.
+    # Phase 3 is memory-heavy: return_attention=True materializes attention
+    # weights and raw logits for every layer as batch x heads x seq_len x seq_len.
+    # With seq_len=1024, batch_size=8, n_layers=12 this can trigger the Linux
+    # OOM killer during attention analysis; nvidia-smi may look empty afterward
+    # because the process has already been killed and released GPU memory.
+    # Lower analysis_batches/batch_size/seq_len, or disable the expensive
+    # run_sv_distribution/run_toeplitz/heatmap paths if Phase 3 is killed.
+    # representative_* keeps Phase 3 bounded by limiting figure/SVD targets.
     seeds=[42],
     steps=100000,
     batch_size=8,
@@ -88,6 +95,7 @@ TRAIN = SimpleNamespace(
     eval_interval=5000,
     save_interval=25000,
     analysis_batches=8,
+    analysis_batch_size=2,
     loss_spike_threshold=0.5,
     loss_threshold=None,
     primary_checkpoint_rule="final_step",
@@ -100,6 +108,7 @@ TRAIN = SimpleNamespace(
     save_final_optimizer=True,
     skip_completed_runs=True,
     resume_from_checkpoint=True,
+    require_final_checkpoints_for_phase3=True,
     run_phase3_analysis=True,
     run_phase3_on_final_checkpoint_skip=True,
     run_length_extrapolation=False,
@@ -111,7 +120,7 @@ TRAIN = SimpleNamespace(
     long_range_fraction=0.25,
     spectral_topk_values=[1, 4, 8],
     spectral_analysis_layers=[1, 6, 10],
-    spectral_analysis_heads=[0, 1, 2, 3],
+    spectral_analysis_heads=[0, 1],
     representative_layers=[1, 6, 10],
     representative_heads=[0, 1, 2, 3],
     max_heatmap_seq_len=128,
@@ -120,7 +129,7 @@ TRAIN = SimpleNamespace(
     run_attn_entropy=True,
     run_attn_distance=True,
     run_sv_distribution=True,
-    run_toeplitz=True,
+    run_toeplitz=False,
 )
 
 SAE = SimpleNamespace(
@@ -225,6 +234,7 @@ def apply_smoke_test_config(root="./output/smoke_test", include_downstream=True)
     TRAIN.seeds = [42]
     TRAIN.steps = 5
     TRAIN.batch_size = 2
+    TRAIN.analysis_batch_size = 2
     TRAIN.device = "cpu"
     TRAIN.precision = "fp32"
     TRAIN.log_interval = 1
