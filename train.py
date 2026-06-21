@@ -585,6 +585,8 @@ class Train:
             validation_checkpoints = self.validation_candidates_from_history(model_name, seed, history)
             self.logger.log_stage_start(f"resume {model_name} seed {seed} from step {start_step}")
         start_time = time.perf_counter()
+        last_log_time = start_time
+        last_log_step = start_step
         latest_valid = None
 
         for step in range(start_step + 1, self.train_cfg.steps + 1):
@@ -615,14 +617,36 @@ class Train:
             grad_norms.append((step, grad_norm_value))
 
             if step % self.train_cfg.log_interval == 0 or step == 1:
+                now = time.perf_counter()
+                interval_seconds = max(now - last_log_time, 1e-9)
+                interval_steps = max(step - last_log_step, 1)
+                steps_per_second = interval_steps / interval_seconds
+                tokens_per_second = (
+                    interval_steps
+                    * self.train_cfg.batch_size
+                    * self.model_cfg.seq_len
+                    / interval_seconds
+                )
+                elapsed_seconds = now - start_time
                 row = {
                     "step": step,
                     "train_loss": loss_value,
                     "grad_norm": grad_norm_value,
                     "lr": current_lr,
+                    "steps_per_second": steps_per_second,
+                    "tokens_per_second": tokens_per_second,
+                    "elapsed_seconds": elapsed_seconds,
                 }
                 history.append(row)
                 self.logger.log_metric(f"{model_name}/train_loss", row["train_loss"], step)
+                self.logger.write(
+                    f"[speed step={step}] {model_name} "
+                    f"{steps_per_second:.4f} step/s "
+                    f"{tokens_per_second:.0f} token/s "
+                    f"elapsed={elapsed_seconds:.1f}s lr={current_lr:.3g}"
+                )
+                last_log_time = now
+                last_log_step = step
             if step % self.train_cfg.eval_interval == 0 or step == self.train_cfg.steps:
                 valid = self.validate(model)
                 history.append({"step": step, **valid})

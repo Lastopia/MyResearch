@@ -124,6 +124,10 @@ def print_task_status():
     print(json.dumps(task_status(), indent=2, ensure_ascii=False))
 
 
+def print_current_task():
+    print(f"[task] current: {PIPELINE.task_name}")
+
+
 def paths_for_task(task_name):
     validate_task_name(task_name)
     output_dir = Path("./output") / task_name
@@ -217,8 +221,8 @@ def stage_done(stage):
     return checks[stage]()
 
 
-def stage_parameters(stage):
-    parameters = {
+def stage_config(stage):
+    configs = {
         "data": {"data": DATA},
         "model": {"model": MODEL},
         "train": {"train": TRAIN},
@@ -270,14 +274,14 @@ def stage_parameters(stage):
         "task": task_status,
         "all": experiment_config,
     }
-    if stage not in parameters:
-        raise ValueError(f"Unknown parameter stage: {stage}")
-    item = parameters[stage]
+    if stage not in configs:
+        raise ValueError(f"Unknown config stage: {stage}")
+    item = configs[stage]
     return item() if callable(item) else namespace_to_dict(item)
 
 
-def print_stage_parameters(stage):
-    print_json = json.dumps(stage_parameters(stage), indent=2, ensure_ascii=False)
+def print_stage_config(stage):
+    print_json = json.dumps(stage_config(stage), indent=2, ensure_ascii=False)
     print(print_json)
 
 
@@ -472,52 +476,74 @@ def set_stage_config(stage, assignments_text):
     print("done")
 
 
-def use_gpu_count(requested_count):
-    if requested_count <= 0:
-        raise ValueError("GPU count must be a positive integer.")
-    detected_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if detected_count != requested_count:
-        raise RuntimeError(
-            f"Requested {requested_count} GPU(s), but detected {detected_count}. "
-            "Exact match is required."
+def nvidia_smi_status():
+    query = "index,name,driver_version,memory.total,memory.free,memory.used,compute_cap"
+    cmd = [
+        "nvidia-smi",
+        f"--query-gpu={query}",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        return {"available": False, "error": "nvidia-smi not found on PATH", "gpu_count": 0, "gpus": []}
+    except subprocess.CalledProcessError as exc:
+        return {
+            "available": False,
+            "error": (exc.stderr or exc.stdout or str(exc)).strip(),
+            "gpu_count": 0,
+            "gpus": [],
+        }
+
+    gpus = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 7:
+            continue
+        index, name, driver, total, free, used, compute_cap = parts[:7]
+        gpus.append(
+            {
+                "index": int(index),
+                "name": name,
+                "driver_version": driver,
+                "compute_capability": compute_cap,
+                "total_memory_gb": round(float(total) / 1024, 3),
+                "free_memory_gb": round(float(free) / 1024, 3),
+                "used_memory_gb": round(float(used) / 1024, 3),
+            }
         )
-    gpu_ids = [str(idx) for idx in range(requested_count)]
-    TRAIN.device = "cuda"
-    PIPELINE.train_scheduler_gpu_ids = gpu_ids
-    PIPELINE.train_scheduler_max_parallel = requested_count
-    PIPELINE.use_train_scheduler = requested_count > 1
-    print(
-        "done "
-        f"detected_gpus={detected_count} "
-        f"use_train_scheduler={PIPELINE.use_train_scheduler} "
-        f"train_scheduler_gpu_ids={PIPELINE.train_scheduler_gpu_ids}"
-    )
+    return {"available": True, "error": None, "gpu_count": len(gpus), "gpus": gpus}
 
 
-def gpu_status():
-    cuda_available = torch.cuda.is_available()
-    gpu_count = torch.cuda.device_count() if cuda_available else 0
+def torch_cuda_status():
     status = {
-        "cuda_available": cuda_available,
-        "visible_gpu_count": gpu_count,
-        "configured_train_device": TRAIN.device,
-        "use_train_scheduler": PIPELINE.use_train_scheduler,
-        "train_scheduler_gpu_ids": PIPELINE.train_scheduler_gpu_ids,
-        "train_scheduler_max_parallel": PIPELINE.train_scheduler_max_parallel,
+        "available": False,
+        "gpu_count": 0,
+        "cuda_version": torch.version.cuda,
+        "error": None,
         "gpus": [],
     }
-    if not cuda_available:
+    try:
+        status["available"] = torch.cuda.is_available()
+        status["gpu_count"] = torch.cuda.device_count() if status["available"] else 0
+    except Exception as exc:
+        status["error"] = str(exc)
         return status
 
-    for idx in range(gpu_count):
+    if not status["available"]:
+        return status
+
+    for idx in range(status["gpu_count"]):
         props = torch.cuda.get_device_properties(idx)
         free_bytes = None
         total_visible_bytes = None
         try:
             with torch.cuda.device(idx):
                 free_bytes, total_visible_bytes = torch.cuda.mem_get_info()
-        except Exception:
-            pass
+        except Exception as exc:
+            status["error"] = str(exc)
 
         total_bytes = int(props.total_memory)
         used_bytes = (
@@ -532,27 +558,69 @@ def gpu_status():
                 "compute_capability": f"{props.major}.{props.minor}",
                 "multi_processor_count_sm": props.multi_processor_count,
                 "total_memory_gb": round(total_bytes / (1024**3), 3),
-                "free_memory_gb": (
-                    round(int(free_bytes) / (1024**3), 3)
-                    if free_bytes is not None
-                    else None
-                ),
-                "used_memory_gb": (
-                    round(used_bytes / (1024**3), 3)
-                    if used_bytes is not None
-                    else None
-                ),
-                "torch_current_process_allocated_gb": round(
-                    torch.cuda.memory_allocated(idx) / (1024**3),
-                    3,
-                ),
-                "torch_current_process_reserved_gb": round(
-                    torch.cuda.memory_reserved(idx) / (1024**3),
-                    3,
-                ),
+                "free_memory_gb": round(int(free_bytes) / (1024**3), 3) if free_bytes is not None else None,
+                "used_memory_gb": round(used_bytes / (1024**3), 3) if used_bytes is not None else None,
+                "torch_current_process_allocated_gb": round(torch.cuda.memory_allocated(idx) / (1024**3), 3),
+                "torch_current_process_reserved_gb": round(torch.cuda.memory_reserved(idx) / (1024**3), 3),
             }
         )
     return status
+
+
+def use_gpu_count(requested_count):
+    if requested_count <= 0:
+        raise ValueError("GPU count must be a positive integer.")
+    smi = nvidia_smi_status()
+    torch_status = torch_cuda_status()
+    physical_count = smi["gpu_count"]
+    torch_count = torch_status["gpu_count"]
+    if physical_count and physical_count != requested_count:
+        raise RuntimeError(
+            f"Requested {requested_count} GPU(s), but nvidia-smi detects {physical_count}. "
+            "Exact match is required."
+        )
+    if torch_count != requested_count:
+        if smi["available"]:
+            raise RuntimeError(
+                f"Requested {requested_count} GPU(s). nvidia-smi detects {physical_count} physical GPU(s), "
+                f"but PyTorch detects {torch_count} usable CUDA GPU(s). "
+                f"torch.version.cuda={torch_status['cuda_version']}. "
+                "This usually means the NVIDIA driver is too old for this PyTorch CUDA build, "
+                "or the current Python/conda environment cannot access CUDA."
+            )
+        raise RuntimeError(
+            f"Requested {requested_count} GPU(s), but nvidia-smi is unavailable ({smi['error']}) "
+            f"and PyTorch detects {torch_count} usable CUDA GPU(s)."
+        )
+    gpu_ids = [str(idx) for idx in range(requested_count)]
+    TRAIN.device = "cuda"
+    PIPELINE.train_scheduler_gpu_ids = gpu_ids
+    PIPELINE.train_scheduler_max_parallel = requested_count
+    PIPELINE.use_train_scheduler = requested_count > 1
+    print(
+        "done "
+        f"detected_gpus={torch_count} "
+        f"use_train_scheduler={PIPELINE.use_train_scheduler} "
+        f"train_scheduler_gpu_ids={PIPELINE.train_scheduler_gpu_ids}"
+    )
+
+
+def gpu_status():
+    smi = nvidia_smi_status()
+    torch_status = torch_cuda_status()
+    return {
+        "nvidia_smi": smi,
+        "torch_cuda": torch_status,
+        "diagnosis": (
+            "nvidia-smi sees GPU(s), but PyTorch cannot use CUDA. Fix driver/PyTorch CUDA compatibility."
+            if smi["gpu_count"] > 0 and torch_status["gpu_count"] == 0
+            else None
+        ),
+        "configured_train_device": TRAIN.device,
+        "use_train_scheduler": PIPELINE.use_train_scheduler,
+        "train_scheduler_gpu_ids": PIPELINE.train_scheduler_gpu_ids,
+        "train_scheduler_max_parallel": PIPELINE.train_scheduler_max_parallel,
+    }
 
 
 def print_gpu_status():
@@ -590,7 +658,7 @@ def attention_stage_config(train_runner, data_res, train_res):
                 "valid_loss_at_checkpoint": state.get("valid_loss_at_checkpoint"),
             }
     return {
-        "attention": stage_parameters("attention"),
+        "attention": stage_config("attention"),
         "model": train_runner.model_cfg,
         "data_meta": data_res.get("meta", {}),
         "train_checkpoints": train_checkpoints,
@@ -754,12 +822,12 @@ def clear_sae(task_name):
 
 def print_console_help():
     print("Commands:")
-    print("  run data | run train | run attention | run sae | run eval | run interpret | run all")
+    print("  run train | run attention | run sae | run eval | run interpret | run all")
     print("  check data result | check train result | check attention result | check sae result")
     print("  check eval result | check interpret result")
-    print("  check data para | check model para | check train para | check attention para")
-    print("  check sae para | check eval para | check interpret para | check task para | check all para")
-    print("  set task name <task_name>")
+    print("  check data cfg | check model cfg | check train cfg | check attention cfg")
+    print("  check sae cfg | check eval cfg | check interpret cfg | check task cfg | check all cfg")
+    print("  set task <task_name>")
     print("  set train cfg key=value [key=value ...]")
     print("  set data/model/attention/sae/eval/interpret/pipeline cfg key=value [key=value ...]")
     print("  use gpu <count>")
@@ -782,18 +850,20 @@ def handle_console_command(command):
         print_gpu_status()
         return True
 
-    task_prefix = "set task name "
-    if command.startswith(task_prefix):
-        parts = raw_command.split(maxsplit=3)
-        if len(parts) != 4:
-            print("Use: set task name <task_name>")
+    if command == "set task" or command.startswith("set task "):
+        parts = raw_command.split(maxsplit=2)
+        if len(parts) != 3:
+            print("Use: set task <task_name>")
             return True
-        set_task_paths(parts[3].strip())
+        task_name = parts[2].strip()
+        if task_name.lower() == "name":
+            print("Use: set task <task_name>")
+            return True
+        set_task_paths(task_name)
         print_task_status()
         return True
 
     run_commands = {
-        "run data": run_data_stage,
         "run train": run_train_stage,
         "run attention": run_attention_stage,
         "run phase3": run_attention_stage,
@@ -810,14 +880,14 @@ def handle_console_command(command):
     check_prefix = "check "
     if command.startswith(check_prefix):
         parts = command[len(check_prefix) :].split()
-        if len(parts) != 2 or parts[1] not in {"result", "para"}:
-            print("Use: check <stage> result  or  check <stage> para")
+        if len(parts) != 2 or parts[1] not in {"result", "cfg"}:
+            print("Use: check <stage> result  or  check <stage> cfg")
             return True
         stage, target = parts
         if target == "result":
             print(str(stage_done(stage)).lower())
         else:
-            print_stage_parameters(stage)
+            print_stage_config(stage)
         return True
 
     set_prefix = "set "
@@ -874,9 +944,10 @@ def interactive_console():
     prepare_dirs()
     print(REMARK)
     print("Interactive experiment console. Type 'help' for commands, 'exit' to quit.")
+    print_current_task()
     while True:
         try:
-            command = input("main.py> ")
+            command = input(f"main.py[{PIPELINE.task_name}]> ")
         except EOFError:
             print()
             break
@@ -980,6 +1051,8 @@ def train_shard_commands():
                         "cuda:0",
                         "--shard-root",
                         str(shard_dir),
+                        "--task-name",
+                        PIPELINE.task_name,
                     ],
                 }
             )
@@ -1267,6 +1340,7 @@ def parse_args():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--shard-root")
+    parser.add_argument("--task-name")
     parser.add_argument("--use-train-scheduler", action="store_true")
     parser.add_argument("--train-gpus")
     parser.add_argument("--train-max-parallel", type=int)
@@ -1276,6 +1350,8 @@ if __name__ == "__main__":
     args = parse_args()
     if args.smoke_test:
         configure_smoke_test(args.smoke_output_root)
+    if args.task_name:
+        set_task_paths(args.task_name)
     if args.train_shard:
         print(REMARK)
         run_train_shard(args.model_name, args.seed, args.device, args.shard_root)

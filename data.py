@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -143,8 +144,18 @@ class GenerateData:
             if self.hf_token:
                 kwargs["token"] = self.hf_token
             if self.data_cfg.dataset_config:
+                print(
+                    f"[data] loading HF dataset {self.data_cfg.dataset}/{self.data_cfg.dataset_config} "
+                    f"streaming={self.data_cfg.streaming} cache_dir={self.hf_cache_dir}",
+                    flush=True,
+                )
                 ds = load_dataset(self.data_cfg.dataset, self.data_cfg.dataset_config, **kwargs)
             else:
+                print(
+                    f"[data] loading HF dataset {self.data_cfg.dataset} "
+                    f"streaming={self.data_cfg.streaming} cache_dir={self.hf_cache_dir}",
+                    flush=True,
+                )
                 ds = load_dataset(self.data_cfg.dataset, **kwargs)
             for row in ds:
                 text = row.get(self.data_cfg.text_key, "")
@@ -154,13 +165,36 @@ class GenerateData:
     def build_blocks(self, tokenizer):
         needed = (self.data_cfg.train_blocks + self.data_cfg.valid_blocks) * (self.data_cfg.seq_len + 1)
         token_ids = []
+        docs_seen = 0
+        last_log = time.perf_counter()
+        print(
+            f"[data] building token blocks: target_tokens={needed} "
+            f"train_blocks={self.data_cfg.train_blocks} valid_blocks={self.data_cfg.valid_blocks} "
+            f"seq_len={self.data_cfg.seq_len}",
+            flush=True,
+        )
         for text in self.text_stream():
+            docs_seen += 1
             token_ids.extend(tokenizer.encode(text + tokenizer.eos_token))
+            now = time.perf_counter()
+            if docs_seen == 1 or docs_seen % 1000 == 0 or now - last_log >= 30:
+                pct = min(100.0, 100.0 * len(token_ids) / max(needed, 1))
+                print(
+                    f"[data] tokenizing progress: docs={docs_seen} "
+                    f"tokens={len(token_ids)}/{needed} ({pct:.2f}%)",
+                    flush=True,
+                )
+                last_log = now
             if len(token_ids) >= needed:
                 break
         if len(token_ids) < needed:
+            print(
+                f"[data] source produced only {len(token_ids)} tokens; repeating to reach {needed}",
+                flush=True,
+            )
             repeats = (needed // max(len(token_ids), 1)) + 1
             token_ids = (token_ids * repeats)[:needed]
+        print(f"[data] token block build complete: docs={docs_seen} tokens={needed}", flush=True)
         ids = torch.tensor(token_ids[:needed], dtype=torch.long)
         return ids.view(-1, self.data_cfg.seq_len + 1)
 
@@ -177,7 +211,9 @@ class GenerateData:
 
     def load_cache(self, tokenizer):
         if not self.cache_path.exists():
+            print(f"[data] token cache miss: {self.cache_path}", flush=True)
             return None
+        print(f"[data] token cache hit: {self.cache_path}", flush=True)
         cached = torch.load(self.cache_path, map_location="cpu")
         return {
             "train": BlockDataset(cached["train_blocks"]),
@@ -187,6 +223,7 @@ class GenerateData:
         }
 
     def run(self):
+        print(f"[data] loading tokenizer: {self.data_cfg.tokenizer}", flush=True)
         tokenizer = self.load_tokenizer()
         if self.data_cfg.use_cache:
             cached = self.load_cache(tokenizer)
@@ -210,5 +247,10 @@ class GenerateData:
             },
         }
         if self.data_cfg.use_cache:
+            print(f"[data] saving token cache: {self.cache_path}", flush=True)
             self.save_cache(data_res)
+        print(
+            f"[data] ready: train_blocks={len(train_blocks)} valid_blocks={len(valid_blocks)}",
+            flush=True,
+        )
         return data_res

@@ -3,7 +3,7 @@
 ```text
 check gpu
 use gpu 2
-set task name task1
+set task task1
 
 check data result
 check train result
@@ -12,17 +12,16 @@ check sae result
 check eval result
 check interpret result
 
-check data para
-check model para
-check train para
-check attention para
-check sae para
-check eval para
-check interpret para
-check task para
-check all para
+check data cfg
+check model cfg
+check train cfg
+check attention cfg
+check sae cfg
+check eval cfg
+check interpret cfg
+check task cfg
+check all cfg
 
-run data
 run train
 run attention
 run sae
@@ -39,11 +38,11 @@ clear task1 sae
 Task folders:
 
 ```text
-set task name task1
-check task para
+set task task1
+check task cfg
 ```
 
-After `set task name task1`, task-specific outputs are separated into:
+After `set task task1`, task-specific outputs are separated into:
 
 ```text
 output/task1/
@@ -55,7 +54,7 @@ ckpt/task1/
 Switching back is just:
 
 ```text
-set task name task1
+set task task1
 ```
 
 Then `check ... result` and `run ...` will use that task's existing files.
@@ -79,7 +78,7 @@ set train cfg steps=30000 batch_size=8 warmup_steps=500 eval_interval=5000 save_
 set attention cfg analysis_batches=4 analysis_batch_size=2 run_sv_distribution=true run_toeplitz=false
 set sae cfg steps=1200 max_activation_tokens=32768 max_validation_activation_tokens=8192
 set eval cfg max_probe_train_tokens=4096 max_probe_valid_tokens=2048 probe_steps=100
-check all para
+check all cfg
 ```
 
 Copy-paste preset: fast trend run:
@@ -90,14 +89,12 @@ set train cfg steps=20000 batch_size=8 warmup_steps=300 eval_interval=5000 save_
 set attention cfg analysis_batches=2 analysis_batch_size=1 run_sv_distribution=false run_toeplitz=false
 set sae cfg steps=800 max_activation_tokens=16384 max_validation_activation_tokens=4096
 set eval cfg max_probe_train_tokens=2048 max_probe_valid_tokens=1024 probe_steps=80
-check all para
+check all cfg
 ```
 
 Recommended stage order:
 
 ```text
-run data
-check data result
 run train
 check train result
 run attention
