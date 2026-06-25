@@ -3,7 +3,6 @@ import ast
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +16,7 @@ from eval import Evaluate
 from interpret import InterpretSAE
 from logger import ExperimentLogger
 from model import SelfTransformer
-from para import (DATA,EVAL,INTERP,MODEL,PATH,SAE,SECRETS,SMOKE_TEST,TRAIN,REMARK,apply_smoke_test_config)
+from para import (DATA,EVAL,INTERP,MODEL,PATH,SAE,SECRETS,TRAIN,REMARK)
 from sae import SelfSAE
 from train import Train
 from utils import (ensure_dirs,load_json,manifest_is_current,namespace_to_dict,runtime_environment_info,save_json,save_manifest)
@@ -35,7 +34,6 @@ PIPELINE = SimpleNamespace(
     run_sae=True,
     run_eval=True,
     run_interpret=False,
-    experiment_name="v1.0",
     # Optional training scheduler. It shards TRAIN by model_name x seed and
     # launches one shard per selected GPU.
     use_train_scheduler=False,
@@ -43,26 +41,6 @@ PIPELINE = SimpleNamespace(
     train_scheduler_max_parallel=None,
     task_name="default",
 )
-
-if SMOKE_TEST:
-    PIPELINE.run_sae = False
-    PIPELINE.run_eval = False
-    PIPELINE.run_interpret = False
-    PIPELINE.experiment_name = "smoke_test"
-
-def configure_smoke_test(output_root):
-    apply_smoke_test_config(root=output_root, include_downstream=True)
-    PIPELINE.run_data = True
-    PIPELINE.run_model = True
-    PIPELINE.run_train = True
-    PIPELINE.run_attention = True
-    PIPELINE.run_sae = True
-    PIPELINE.run_eval = True
-    PIPELINE.run_interpret = True
-    PIPELINE.use_train_scheduler = False
-    PIPELINE.train_scheduler_max_parallel = None
-    PIPELINE.experiment_name = "smoke_test"
-    PIPELINE.task_name = "smoke_test"
 
 def prepare_dirs():
     ensure_dirs(
@@ -82,19 +60,8 @@ def prepare_dirs():
     )
 
 
-def validate_task_name(task_name):
-    if not task_name:
-        raise ValueError("Task name cannot be empty.")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", task_name):
-        raise ValueError("Task name may only contain letters, numbers, '_', '-', and '.'.")
-    if task_name in {".", ".."}:
-        raise ValueError("Task name cannot be '.' or '..'.")
-
-
 def set_task_paths(task_name):
-    validate_task_name(task_name)
     PIPELINE.task_name = task_name
-    PIPELINE.experiment_name = task_name
     PATH.output_dir = f"./output/{task_name}"
     PATH.ckpt_dir = f"./ckpt/{task_name}"
     PATH.figure_dir = f"./output/{task_name}/figures"
@@ -108,7 +75,6 @@ def set_task_paths(task_name):
 def task_status():
     return {
         "task_name": PIPELINE.task_name,
-        "experiment_name": PIPELINE.experiment_name,
         "paths": namespace_to_dict(PATH),
         "exists": {
             "output_dir": Path(PATH.output_dir).exists(),
@@ -129,7 +95,6 @@ def print_current_task():
 
 
 def paths_for_task(task_name):
-    validate_task_name(task_name)
     output_dir = Path("./output") / task_name
     ckpt_dir = Path("./ckpt") / task_name
     return {
@@ -145,19 +110,8 @@ def maybe_prepare_current_task(task_name):
     if task_name == PIPELINE.task_name:
         prepare_dirs()
 
-def path_is_within_workspace(path):
-    try:
-        resolved = Path(path).resolve()
-        workspace = Path.cwd().resolve()
-        return resolved == workspace or workspace in resolved.parents
-    except OSError:
-        return False
-
-
 def remove_path(path):
     path = Path(path)
-    if not path_is_within_workspace(path):
-        raise ValueError(f"Refusing to clear path outside workspace: {path}")
     if path.is_dir():
         shutil.rmtree(path)
     elif path.exists():
@@ -216,8 +170,6 @@ def stage_done(stage):
             ]
         ),
     }
-    if stage not in checks:
-        raise ValueError(f"Unknown check stage: {stage}")
     return checks[stage]()
 
 
@@ -274,8 +226,6 @@ def stage_config(stage):
         "task": task_status,
         "all": experiment_config,
     }
-    if stage not in configs:
-        raise ValueError(f"Unknown config stage: {stage}")
     item = configs[stage]
     return item() if callable(item) else namespace_to_dict(item)
 
@@ -297,31 +247,7 @@ def cfg_namespace(stage):
         "interpret": INTERP,
         "pipeline": PIPELINE,
     }
-    if stage not in namespaces:
-        raise ValueError(f"Unknown config stage: {stage}")
     return namespaces[stage]
-
-
-def attention_cfg_keys():
-    return {
-        "analysis_batches",
-        "analysis_batch_size",
-        "local_attention_windows",
-        "long_range_fraction",
-        "spectral_topk_values",
-        "spectral_analysis_layers",
-        "spectral_analysis_heads",
-        "representative_layers",
-        "representative_heads",
-        "max_heatmap_seq_len",
-        "run_phase3_analysis",
-        "run_attention_heatmaps",
-        "run_spectral_plots",
-        "run_attn_entropy",
-        "run_attn_distance",
-        "run_sv_distribution",
-        "run_toeplitz",
-    }
 
 
 def parse_cfg_value(text, current_value):
@@ -452,27 +378,12 @@ def split_cfg_assignments(text):
 def set_stage_config(stage, assignments_text):
     cfg = cfg_namespace(stage)
     tokens = split_cfg_assignments(assignments_text)
-    if not tokens:
-        raise ValueError("No config assignments provided.")
 
-    pending = []
-    valid_attention_keys = attention_cfg_keys()
     for token in tokens:
-        if "=" not in token:
-            raise ValueError(f"Expected key=value assignment, got {token}")
         key, value_text = token.split("=", 1)
         key = key.strip()
-        if not key:
-            raise ValueError(f"Empty config key in assignment {token}")
-        if not hasattr(cfg, key):
-            raise ValueError(f"Unknown {stage} config key: {key}")
-        if stage in {"attention", "phase3"} and key not in valid_attention_keys:
-            raise ValueError(f"{key} belongs to TRAIN, but is not an attention config key.")
         current_value = getattr(cfg, key)
-        pending.append((key, parse_cfg_value(value_text, current_value)))
-
-    for key, value in pending:
-        setattr(cfg, key, value)
+        setattr(cfg, key, parse_cfg_value(value_text, current_value))
     print("done")
 
 
@@ -568,8 +479,6 @@ def torch_cuda_status():
 
 
 def use_gpu_count(requested_count):
-    if requested_count <= 0:
-        raise ValueError("GPU count must be a positive integer.")
     smi = nvidia_smi_status()
     torch_status = torch_cuda_status()
     physical_count = smi["gpu_count"]
@@ -852,14 +761,7 @@ def handle_console_command(command):
 
     if command == "set task" or command.startswith("set task "):
         parts = raw_command.split(maxsplit=2)
-        if len(parts) != 3:
-            print("Use: set task <task_name>")
-            return True
-        task_name = parts[2].strip()
-        if task_name.lower() == "name":
-            print("Use: set task <task_name>")
-            return True
-        set_task_paths(task_name)
+        set_task_paths(parts[2].strip())
         print_task_status()
         return True
 
@@ -880,46 +782,27 @@ def handle_console_command(command):
     check_prefix = "check "
     if command.startswith(check_prefix):
         parts = command[len(check_prefix) :].split()
-        if len(parts) != 2 or parts[1] not in {"result", "cfg"}:
-            print("Use: check <stage> result  or  check <stage> cfg")
-            return True
         stage, target = parts
         if target == "result":
             print(str(stage_done(stage)).lower())
-        else:
+        elif target == "cfg":
             print_stage_config(stage)
         return True
 
     set_prefix = "set "
     if command.startswith(set_prefix):
         parts = raw_command.split(maxsplit=3)
-        if len(parts) < 4 or parts[2].lower() != "cfg":
-            print("Use: set <stage> cfg key=value [key=value ...]")
-            return True
-        stage = parts[1].lower()
-        assignments_text = parts[3]
-        set_stage_config(stage, assignments_text)
+        set_stage_config(parts[1].lower(), parts[3])
         return True
 
     use_gpu_prefix = "use gpu "
     if command.startswith(use_gpu_prefix):
         parts = command.split()
-        if len(parts) != 3:
-            print("Use: use gpu <count>")
-            return True
-        try:
-            requested_count = int(parts[2])
-        except ValueError:
-            print("Use: use gpu <count>")
-            return True
-        use_gpu_count(requested_count)
+        use_gpu_count(int(parts[2]))
         return True
 
     if command.startswith("clear "):
         parts = raw_command.split()
-        if len(parts) != 3:
-            print("Use: clear <task_name> <output|models|attention|sae>")
-            return True
         task_name = parts[1]
         target = parts[2].lower()
         clear_commands = {
@@ -928,9 +811,6 @@ def handle_console_command(command):
             "attention": clear_attention,
             "sae": clear_sae,
         }
-        if target not in clear_commands:
-            print("Use: clear <task_name> <output|models|attention|sae>")
-            return True
         clear_commands[target](task_name)
         print("done")
         return True
@@ -977,7 +857,6 @@ def experiment_config():
             "run_sae": PIPELINE.run_sae,
             "run_eval": PIPELINE.run_eval,
             "run_interpret": PIPELINE.run_interpret,
-            "experiment_name": PIPELINE.experiment_name,
             "use_train_scheduler": PIPELINE.use_train_scheduler,
             "train_scheduler_gpu_ids": PIPELINE.train_scheduler_gpu_ids,
             "train_scheduler_max_parallel": PIPELINE.train_scheduler_max_parallel,
@@ -995,7 +874,7 @@ def experiment_manifest():
     # are still valid.
     config = experiment_config()
     return {
-        "experiment_name": PIPELINE.experiment_name,
+        "task_name": PIPELINE.task_name,
         "config_snapshot": config,
         "random_seeds": {
             "data_seed": getattr(DATA, "seed", None),
@@ -1259,7 +1138,7 @@ def run():
     prepare_dirs()
     logger = ExperimentLogger()
     logger.log_stage_start(
-        f"Main pipeline: experiment={PIPELINE.experiment_name} "
+        f"Main pipeline: task={PIPELINE.task_name} "
         f"flags=data:{PIPELINE.run_data} model:{PIPELINE.run_model} train:{PIPELINE.run_train} "
         f"attention:{PIPELINE.run_attention} sae:{PIPELINE.run_sae} "
         f"eval:{PIPELINE.run_eval} interpret:{PIPELINE.run_interpret}"
@@ -1332,8 +1211,6 @@ def run():
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument("--smoke-output-root", default="./output/smoke_test")
     parser.add_argument("--run-once", action="store_true")
     parser.add_argument("--train-shard", action="store_true")
     parser.add_argument("--model-name")
@@ -1348,8 +1225,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.smoke_test:
-        configure_smoke_test(args.smoke_output_root)
     if args.task_name:
         set_task_paths(args.task_name)
     if args.train_shard:

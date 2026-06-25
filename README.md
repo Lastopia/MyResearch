@@ -131,7 +131,6 @@ python main.py --use-train-scheduler --train-gpus 0,1
 - `rope`：RoPE
 - `pope`：PoPE
 - `alibi`：ALiBi-style linear relative-distance bias in attention logits
-- `pope_alibi`：PoPE + ALiBi-style explicit relative routing bias
 
 实验计划和阶段定义见 [Experiment Report.md](./Experiment%20Report.md)。
 
@@ -178,7 +177,6 @@ cache/dataset/tokenizers/gpt2/
 
 最常改的配置：
 
-- `SMOKE_TEST`：是否启用本地快速测试。
 - `DATA`：数据集、tokenizer、序列长度、训练/验证 block 数。
 - `MODEL`：模型结构和 positional encoding 列表。
 - `TRAIN`：训练步数、batch size、学习率、checkpoint 和 Phase 3 attention 分析设置。
@@ -189,35 +187,13 @@ cache/dataset/tokenizers/gpt2/
 默认主实验模型列表：
 
 ```python
-MODEL.model_names = ["std", "rope", "pope", "alibi", "pope_alibi"]
+MODEL.model_names = ["std", "rope", "pope", "alibi"]
 TRAIN.seeds = [41, 42, 43]
 ```
 
-## 3. 快速测试
+## 3. 正式运行
 
-如果只是检查 pipeline 能不能跑通，把 [para.py](./para.py) 中：
-
-```python
-SMOKE_TEST = True
-```
-
-然后运行：
-
-```bash
-python main.py
-```
-
-Smoke test 会使用 tiny synthetic data、小模型、CPU、极少训练步数，并跳过 SAE / Eval / Interpret。它只用于验证代码路径，不用于实验结论。
-
-## 4. 正式运行
-
-确认 [para.py](./para.py) 中：
-
-```python
-SMOKE_TEST = False
-```
-
-然后运行完整 pipeline：
+运行完整 pipeline：
 
 ```bash
 python main.py
@@ -228,7 +204,7 @@ python main.py
 默认阶段顺序：
 
 1. `data.py`：加载/缓存数据。
-2. `model.py`：构建 `std / rope / pope / alibi / pope_alibi` 模型。
+2. `model.py`：构建 `std / rope / pope / alibi` 模型。
 3. `train.py`：Phase 2 训练评估 + Phase 3 attention 机制分析。
 4. `sae.py`：Phase 4a TopK-SAE。
 5. `eval.py`：Phase 5 disentanglement benchmark。
@@ -382,7 +358,7 @@ OPENAI_API_KEY=sk_your_key
 
 在两张 A100 条件下，建议先跑：
 
-- Phase 2/3：完整 `std / rope / pope / alibi / pope_alibi × 3 seeds`
+- Phase 2/3：完整 `std / rope / pope / alibi × 3 seeds`
 - Phase 4a：代表层 `[2, 6, 10]`，固定 dictionary size 和 Top-K
 - Phase 5：限流 probe 和 feature-level 指标
 - Phase 6：先 `dry_run=True`，确认 prompt 和样例格式，再少量 OpenAI-run

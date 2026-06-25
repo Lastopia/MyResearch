@@ -28,25 +28,10 @@ POSITION_ENCODING_REGISTRY = {
         "uses_qk_rotation": False,
         "trainable_position_parameters": 0,
     },
-    "pope_alibi": {
-        "description": "PoPE Q/K phase decoupling plus ALiBi-style explicit relative routing bias in attention logits.",
-        "uses_qk_rotation": True,
-        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
-    },
-    "pop1_alibi": {
-        "description": "Alias for pope_alibi, kept for POP1 + ALiBi experiment naming.",
-        "uses_qk_rotation": True,
-        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
-    },
-    "nope": {
-        "description": "No explicit position encoding; useful as a diagnostic baseline.",
-        "uses_qk_rotation": False,
-        "trainable_position_parameters": 0,
-    },
 }
 
-POPE_ALIBI_TYPES = {"pope", "pope_alibi", "pop1_alibi"}
-ALIBI_TYPES = {"alibi", "pope_alibi", "pop1_alibi"}
+POPE_TYPES = {"pope"}
+ALIBI_TYPES = {"alibi"}
 
 
 def rotate_half(x):
@@ -168,7 +153,7 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(self.d_model, 3 * self.d_model)
         self.out = nn.Linear(self.d_model, self.d_model)
         self.dropout = nn.Dropout(model_cfg.dropout)
-        base = model_cfg.pope_base if position_type in POPE_ALIBI_TYPES else model_cfg.rope_base
+        base = model_cfg.pope_base if position_type in POPE_TYPES else model_cfg.rope_base
         self.rotary = RotaryCache(self.head_dim, model_cfg.seq_len, base)
         self.pope = (
             PoPEApplier(
@@ -178,7 +163,7 @@ class CausalSelfAttention(nn.Module):
                 model_cfg.pope_base,
                 getattr(model_cfg, "pope_type", "modify"),
             )
-            if position_type in POPE_ALIBI_TYPES
+            if position_type in POPE_TYPES
             else None
         )
         self.alibi = ALiBiBias(self.n_heads, model_cfg.seq_len) if position_type in ALIBI_TYPES else None
@@ -193,11 +178,11 @@ class CausalSelfAttention(nn.Module):
 
         if self.position_type == "rope":
             q, k = self.rotary.rope(q), self.rotary.rope(k)
-        elif self.position_type in POPE_ALIBI_TYPES:
+        elif self.position_type in POPE_TYPES:
             if self.pope is None:
                 raise RuntimeError("PoPE applier was not initialized")
             q, k = self.pope(q, k)
-        elif self.position_type not in {"nope", "std", "alibi"}:
+        elif self.position_type not in {"std", "alibi"}:
             raise ValueError(f"Unknown position type: {self.position_type}")
 
         if not return_attention and self.alibi is None:
@@ -336,7 +321,7 @@ class SelfTransformer:
         unknown = [name for name in self.model_cfg.model_names if name not in POSITION_ENCODING_REGISTRY]
         if unknown:
             raise ValueError(f"Unknown model_names: {unknown}")
-        if any(name in POPE_ALIBI_TYPES for name in self.model_cfg.model_names) and self.head_dim % 2 != 0:
+        if any(name in POPE_TYPES for name in self.model_cfg.model_names) and self.head_dim % 2 != 0:
             raise ValueError(f"PoPE requires an even head_dim, got {self.head_dim}")
 
     def build_model(self, model_name):
@@ -346,7 +331,7 @@ class SelfTransformer:
 
     def position_meta(self, model_name):
         meta = dict(POSITION_ENCODING_REGISTRY[model_name])
-        if model_name in POPE_ALIBI_TYPES:
+        if model_name in POPE_TYPES:
             meta["trainable_position_parameters"] = (
                 2 * self.model_cfg.n_layers * self.model_cfg.n_heads * (self.head_dim // 2)
             )

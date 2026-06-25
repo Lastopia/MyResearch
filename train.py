@@ -806,11 +806,6 @@ class Train:
         baseline = baseline or getattr(self.model_cfg, "baseline_model_name", model_names[0] if model_names else "rope")
         targets = list(targets or [name for name in model_names if name != baseline])
         comparisons = [(baseline, target) for target in targets]
-        for pope_alibi_name in ("pope_alibi", "pop1_alibi"):
-            if "pope" in model_names and pope_alibi_name in model_names:
-                comparison = ("pope", pope_alibi_name)
-                if comparison not in comparisons:
-                    comparisons.append(comparison)
         rows = []
         rng = random.Random(0)
         for comparison_baseline, target in comparisons:

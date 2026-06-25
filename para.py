@@ -11,21 +11,17 @@ except ImportError:
 if load_dotenv is not None:
     load_dotenv()
 
-# Set True only for local pipeline checks. Smoke test changes model/data/training
-# sizes near the bottom of this file and should not be used for conclusions.
-SMOKE_TEST = False
-
 PATH = SimpleNamespace(
     # Stage code imports PATH directly, so paths do not need to be threaded
     # through every run() call.
     cache_dir="./cache",
-    ckpt_dir="./ckpt",
-    output_dir="./output",
-    figure_dir="./output/figures",
-    table_dir="./output/tables",
-    log_dir="./output/logs",
-    report_dir="./output/reports",
-    raw_metrics_dir="./output/raw_metrics",
+    ckpt_dir="./ckpt/default",
+    output_dir="./output/default",
+    figure_dir="./output/default/figures",
+    table_dir="./output/default/tables",
+    log_dir="./output/default/logs",
+    report_dir="./output/default/reports",
+    raw_metrics_dir="./output/default/raw_metrics",
 )
 
 SECRETS = SimpleNamespace(
@@ -35,7 +31,7 @@ SECRETS = SimpleNamespace(
 
 DATA = SimpleNamespace(
     # Online local-cache mode: HuggingFace reuses ./cache/dataset and downloads
-    # only missing files. Use "tiny" for an offline smoke test.
+    # only missing files.
     dataset="Skylion007/openwebtext",
     dataset_config=None,
     text_key="text",
@@ -51,9 +47,8 @@ DATA = SimpleNamespace(
 )
 
 MODEL = SimpleNamespace(
-    # GPT-2 small shape trained from scratch. "std" is fixed sinusoidal PE;
-    # "rope"/"pope" rotate Q/K.
-    model_names=["rope", "pope", "alibi", "pope_alibi"],
+    # GPT-2 small shape trained from scratch.
+    model_names=["rope", "pope", "alibi"],
     baseline_model_name="rope",
     run_model_checks=True,
     max_parameter_ratio_delta=0.01,
@@ -80,7 +75,7 @@ TRAIN = SimpleNamespace(
     # Lower analysis_batches/batch_size/seq_len, or disable the expensive
     # run_sv_distribution/run_toeplitz/heatmap paths if Phase 3 is killed.
     # representative_* keeps Phase 3 bounded by limiting figure/SVD targets.
-    seeds=[42],
+    seeds=[41,42,43],
     steps=30000,
     batch_size=8,
     lr=6e-5,
@@ -129,7 +124,7 @@ TRAIN = SimpleNamespace(
     run_attn_entropy=True,
     run_attn_distance=True,
     run_sv_distribution=True,
-    run_toeplitz=False,
+    run_toeplitz=True,
 )
 
 SAE = SimpleNamespace(
@@ -198,87 +193,3 @@ INTERP = SimpleNamespace(
     temperature=0.0,
     skip_completed_stage=False,
 )
-
-
-def set_output_tree(root):
-    PATH.output_dir = root
-    PATH.cache_dir = f"{root}/cache"
-    PATH.ckpt_dir = f"{root}/ckpt"
-    PATH.figure_dir = f"{root}/figures"
-    PATH.table_dir = f"{root}/tables"
-    PATH.log_dir = f"{root}/logs"
-    PATH.report_dir = f"{root}/reports"
-    PATH.raw_metrics_dir = f"{root}/raw_metrics"
-
-
-def apply_smoke_test_config(root="./output/smoke_test", include_downstream=True):
-    global SMOKE_TEST
-    SMOKE_TEST = True
-    set_output_tree(root)
-
-    DATA.dataset = "tiny"
-    DATA.seq_len = 64
-    DATA.train_blocks = 32
-    DATA.valid_blocks = 8
-    DATA.use_cache = False
-    DATA.hf_cache_dir = f"{root}/cache/dataset"
-
-    MODEL.model_names = ["std", "rope", "pope"]
-    MODEL.n_layers = 2
-    MODEL.d_model = 128
-    MODEL.n_heads = 4
-    MODEL.d_ff = 512
-    MODEL.vocab_size = 128
-    MODEL.seq_len = 64
-    
-    TRAIN.seeds = [42]
-    TRAIN.steps = 5
-    TRAIN.batch_size = 2
-    TRAIN.analysis_batch_size = 2
-    TRAIN.device = "cpu"
-    TRAIN.precision = "fp32"
-    TRAIN.log_interval = 1
-    TRAIN.eval_interval = 5
-    TRAIN.save_interval = 5
-    TRAIN.analysis_batches = 1
-    TRAIN.save_eval_checkpoints = False
-    TRAIN.save_optimizer_checkpoints = False
-    TRAIN.save_final_optimizer = False
-    TRAIN.representative_layers = [0, 1]
-    TRAIN.spectral_analysis_layers = [0, 1]
-    TRAIN.representative_heads = [0, 1]
-    TRAIN.spectral_analysis_heads = [0, 1]
-    TRAIN.max_heatmap_seq_len = 32
-
-    SAE.layers = [0, 1]
-    SAE.dictionary_sizes = [256]
-    SAE.topk_values = [16]
-    SAE.device = "cpu"
-    SAE.activation_batch_size = 2
-    SAE.batch_size = 256
-    SAE.steps = 20
-    SAE.seeds = [42]
-    SAE.max_activation_tokens = 2048
-    SAE.max_validation_activation_tokens = 512
-    SAE.log_interval = 10
-    SAE.eval_interval = 10
-
-    EVAL.layers = [0, 1]
-    EVAL.max_probe_train_tokens = 512
-    EVAL.max_probe_valid_tokens = 256
-    EVAL.probe_steps = 5
-    EVAL.probe_batch_size = 64
-    EVAL.correlation_feature_sample = 64
-
-    INTERP.layers = [0, 1]
-    INTERP.model_seeds = [42]
-    INTERP.max_features_per_model_layer = 4
-    INTERP.max_contexts_per_feature = 4
-    INTERP.min_active_contexts = 1
-    INTERP.context_window = 4
-    INTERP.dry_run = True
-    return include_downstream
-
-
-if SMOKE_TEST:
-    apply_smoke_test_config(include_downstream=False)
