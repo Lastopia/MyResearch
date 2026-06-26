@@ -185,15 +185,22 @@ class CausalSelfAttention(nn.Module):
         elif self.position_type not in {"std", "alibi"}:
             raise ValueError(f"Unknown position type: {self.position_type}")
 
-        if not return_attention and self.alibi is None:
+        if not return_attention:
             dropout_p = self.dropout.p if self.training else 0.0
+            attn_mask = None
+            is_causal = True
+            if self.alibi is not None:
+                attn_mask = self.alibi(seq_len, q.dtype, q.device)
+                causal = torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool).tril()
+                attn_mask = attn_mask.masked_fill(~causal.view(1, 1, seq_len, seq_len), torch.finfo(q.dtype).min)
+                is_causal = False
             y = F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=attn_mask,
                 dropout_p=dropout_p,
-                is_causal=True,
+                is_causal=is_causal,
             )
             y = y.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
             return self.out(y), None, None
