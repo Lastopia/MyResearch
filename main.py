@@ -184,6 +184,7 @@ def stage_config(stage):
                 "analysis_batch_size": TRAIN.analysis_batch_size,
                 "local_attention_windows": TRAIN.local_attention_windows,
                 "long_range_fraction": TRAIN.long_range_fraction,
+                "attention_sink_tokens": TRAIN.attention_sink_tokens,
                 "spectral_topk_values": TRAIN.spectral_topk_values,
                 "spectral_analysis_layers": TRAIN.spectral_analysis_layers,
                 "spectral_analysis_heads": TRAIN.spectral_analysis_heads,
@@ -205,6 +206,7 @@ def stage_config(stage):
                 "analysis_batch_size": TRAIN.analysis_batch_size,
                 "local_attention_windows": TRAIN.local_attention_windows,
                 "long_range_fraction": TRAIN.long_range_fraction,
+                "attention_sink_tokens": TRAIN.attention_sink_tokens,
                 "spectral_topk_values": TRAIN.spectral_topk_values,
                 "spectral_analysis_layers": TRAIN.spectral_analysis_layers,
                 "spectral_analysis_heads": TRAIN.spectral_analysis_heads,
@@ -581,6 +583,7 @@ def attention_stage_outputs():
         Path(PATH.raw_metrics_dir) / "attention_manifest.json",
         Path(PATH.table_dir) / "phase3_layer_metrics.csv",
         Path(PATH.table_dir) / "phase3_taxonomy_counts.csv",
+        Path(PATH.table_dir) / "phase3_head_pattern_consistency.csv",
     ]
 
 
@@ -715,7 +718,7 @@ def clear_attention(task_name):
     paths = paths_for_task(task_name)
     for name in ["attention_res.json", "phase3_summary.json", "attention_manifest.json"]:
         remove_path(paths["raw_metrics_dir"] / name)
-    for name in ["phase3_layer_metrics.csv", "phase3_taxonomy_counts.csv"]:
+    for name in ["phase3_layer_metrics.csv", "phase3_taxonomy_counts.csv", "phase3_head_pattern_consistency.csv"]:
         remove_path(paths["table_dir"] / name)
     remove_path(paths["figure_dir"] / "detail" / "phase3")
     maybe_prepare_current_task(task_name)
@@ -726,6 +729,8 @@ def clear_sae(task_name):
     remove_path(paths["ckpt_dir"] / "saes")
     for name in ["sae_res.json", "phase4a_summary.json", "sae_manifest.json"]:
         remove_path(paths["raw_metrics_dir"] / name)
+    for name in ["phase4a_sae_sweep_summary.csv"]:
+        remove_path(paths["table_dir"] / name)
     maybe_prepare_current_task(task_name)
 
 

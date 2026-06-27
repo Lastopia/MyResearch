@@ -27,6 +27,11 @@ def compute_far_attention_mass(attn_weights: torch.Tensor, min_distance: int) ->
     return (attn_weights * far.float()).sum(dim=-1)
 
 
+def compute_attention_sink_mass(attn_weights: torch.Tensor, sink_tokens: int = 1) -> torch.Tensor:
+    sink_tokens = max(1, min(int(sink_tokens), attn_weights.size(-1)))
+    return attn_weights[..., :sink_tokens].sum(dim=-1)
+
+
 def prepare_causal_logits_for_svd(logits: torch.Tensor) -> torch.Tensor:
     seq_len = logits.size(-1)
     causal = torch.ones(seq_len, seq_len, device=logits.device, dtype=torch.bool).tril()

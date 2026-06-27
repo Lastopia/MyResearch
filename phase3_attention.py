@@ -6,6 +6,7 @@ import torch
 from metrics import (
     compute_attention_distance,
     compute_attention_entropy,
+    compute_attention_sink_mass,
     compute_far_attention_mass,
     compute_head_singular_values,
     compute_local_attention_mass,
@@ -42,6 +43,7 @@ class Phase3AttentionAnalyzer:
         head_metrics = {}
         spectra_by_head = {}
         local_windows = getattr(self.train_cfg, "local_attention_windows", [4, 16, 64])
+        sink_tokens = getattr(self.train_cfg, "attention_sink_tokens", 1)
         spectral_topks = getattr(self.train_cfg, "spectral_topk_values", [1, 4, 8])
         far_min_distance = max(1, int(self.model_cfg.seq_len * getattr(self.train_cfg, "long_range_fraction", 0.25)))
         representative_layers = self.representative_layers()
@@ -71,6 +73,8 @@ class Phase3AttentionAnalyzer:
                         head_metrics[layer][f"local_mass_{window}"].append(local_per_head.detach().cpu())
                     far_per_head = compute_far_attention_mass(attn, far_min_distance).mean(dim=(0, 2))
                     head_metrics[layer]["far_mass"].append(far_per_head.detach().cpu())
+                    sink_per_head = compute_attention_sink_mass(attn, sink_tokens).mean(dim=(0, 2))
+                    head_metrics[layer]["attention_sink_mass"].append(sink_per_head.detach().cpu())
             for layer, logits in enumerate(out["attention_logits"]):
                 head_metrics.setdefault(layer, self.empty_head_metric_accumulator())
                 if self.train_cfg.run_sv_distribution and layer in spectral_layers and spectral_heads:
@@ -118,6 +122,7 @@ class Phase3AttentionAnalyzer:
                 "toeplitz_deviation": self.average(layer_toeplitz),
             },
             "layer_group_summary": self.layer_group_summary(headwise),
+            "head_pattern_consistency": self.head_pattern_consistency(headwise),
             "head_wise": headwise,
             "head_taxonomy": taxonomy,
             "figure_paths": figure_paths,
@@ -155,6 +160,7 @@ class Phase3AttentionAnalyzer:
             "entropy": [],
             "distance": [],
             "far_mass": [],
+            "attention_sink_mass": [],
             "toeplitz_deviation": [],
         }
         for window in getattr(self.train_cfg, "local_attention_windows", [4, 16, 64]):
@@ -177,6 +183,53 @@ class Phase3AttentionAnalyzer:
                     ]
             final[str(layer)] = layer_item
         return final
+
+    def pearson(self, xs, ys):
+        pairs = [
+            (float(x), float(y))
+            for x, y in zip(xs, ys)
+            if x is not None and y is not None and math.isfinite(x) and math.isfinite(y)
+        ]
+        if len(pairs) < 2:
+            return None
+        x_vals = [x for x, _ in pairs]
+        y_vals = [y for _, y in pairs]
+        x_mean = sum(x_vals) / len(x_vals)
+        y_mean = sum(y_vals) / len(y_vals)
+        num = sum((x - x_mean) * (y - y_mean) for x, y in pairs)
+        x_den = math.sqrt(sum((x - x_mean) ** 2 for x in x_vals))
+        y_den = math.sqrt(sum((y - y_mean) ** 2 for y in y_vals))
+        den = x_den * y_den
+        return None if den <= 0 else num / den
+
+    def head_pattern_consistency(self, headwise):
+        rows = {}
+        layers = sorted(int(layer) for layer in headwise)
+        metrics = sorted({metric for layer_metrics in headwise.values() for metric in layer_metrics})
+        for metric in metrics:
+            pair_corrs = []
+            adjacent_corrs = []
+            for idx, left in enumerate(layers):
+                left_values = headwise.get(str(left), {}).get(metric)
+                if not left_values:
+                    continue
+                for right in layers[idx + 1 :]:
+                    right_values = headwise.get(str(right), {}).get(metric)
+                    if not right_values:
+                        continue
+                    corr = self.pearson(left_values, right_values)
+                    if corr is None:
+                        continue
+                    pair_corrs.append(corr)
+                    if right == left + 1:
+                        adjacent_corrs.append(corr)
+            rows[metric] = {
+                "all_layer_pair_corr": mean_std(pair_corrs),
+                "adjacent_layer_corr": mean_std(adjacent_corrs),
+                "n_layer_pairs": len(pair_corrs),
+                "n_adjacent_pairs": len(adjacent_corrs),
+            }
+        return rows
 
     def representative_layers(self):
         configured = getattr(self.train_cfg, "representative_layers", None)
@@ -330,11 +383,16 @@ class Phase3AttentionAnalyzer:
                     )
                     paths.append(str(path))
                 layer_metrics = headwise.get(str(layer), {})
-                for metric, ylabel in [
+                metric_specs = [
                     ("entropy", "entropy"),
                     ("distance", "avg distance"),
+                    ("far_mass", "far attention mass"),
+                    ("attention_sink_mass", "attention sink mass"),
                     ("toeplitz_deviation", "toeplitz deviation"),
-                ]:
+                ]
+                for window in getattr(self.train_cfg, "local_attention_windows", [4, 16, 64]):
+                    metric_specs.append((f"local_mass_{window}", f"local attention mass@{window}"))
+                for metric, ylabel in metric_specs:
                     if metric not in layer_metrics:
                         continue
                     path = Path(PATH.figure_dir) / "detail" / "phase3" / (

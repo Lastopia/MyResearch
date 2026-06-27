@@ -127,6 +127,7 @@ class SelfSAE:
         return [
             Path(PATH.raw_metrics_dir) / "sae_res.json",
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
+            Path(PATH.table_dir) / "phase4a_sae_sweep_summary.csv",
         ]
 
     def stage_manifest_path(self):
@@ -472,6 +473,33 @@ class SelfSAE:
             summary_rows.append(row)
         return summary_rows
 
+    def summarize_sweep_rows(self, rows):
+        metrics = [
+            "validation_mse",
+            "explained_variance",
+            "dead_feature_rate",
+            "feature_reuse_rate",
+            "top_feature_activation_frequency",
+            "feature_frequency_entropy_normalized",
+        ]
+        grouped = {}
+        for row in rows:
+            key = (row["model_name"], row["layer"], row["dict_size"], row["k"])
+            grouped.setdefault(key, {metric: [] for metric in metrics})
+            for metric in metrics:
+                value = row.get(metric)
+                if value is not None and math.isfinite(value):
+                    grouped[key][metric].append(value)
+        summary_rows = []
+        for (model_name, layer, dict_size, k), values in grouped.items():
+            row = {"model_name": model_name, "layer": layer, "dict_size": dict_size, "k": k}
+            for metric, metric_values in values.items():
+                stats = mean_std(metric_values)
+                row[f"{metric}_mean"] = stats["mean"]
+                row[f"{metric}_std"] = stats["std"]
+            summary_rows.append(row)
+        return summary_rows
+
     def existing_sae_checkpoint_path(self, model_name, model_seed, layer, dict_size, k, sae_seed):
         return (
             Path(PATH.ckpt_dir)
@@ -684,10 +712,15 @@ class SelfSAE:
         save_json(serializable, Path(PATH.raw_metrics_dir) / "sae_res.json")
         rows = self.flatten_rows(serializable)
         summary_rows = self.summarize_rows(rows)
+        sweep_summary_rows = self.summarize_sweep_rows(rows)
         write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
         write_csv(
             summary_rows,
             Path(PATH.table_dir) / "phase4a_sae_summary.csv",
+        )
+        write_csv(
+            sweep_summary_rows,
+            Path(PATH.table_dir) / "phase4a_sae_sweep_summary.csv",
         )
         save_json(
             {
@@ -699,10 +732,13 @@ class SelfSAE:
                     "sae_seeds": self.sae_cfg.seeds,
                     "activation_site": self.sae_cfg.activation_site,
                     "normalize_activations": getattr(self.sae_cfg, "normalize_activations", True),
-                    "dictionary_size_sensitivity": "deferred_to_phase4b",
-                    "sparsity_sensitivity": "deferred_to_phase4c",
+                    "dictionary_size_sensitivity": (
+                        "available_when_multiple_dictionary_sizes_are_configured"
+                    ),
+                    "sparsity_sensitivity": "available_when_multiple_topk_values_are_configured",
                 },
                 "summary_rows": summary_rows,
+                "sweep_summary_rows": sweep_summary_rows,
                 "run_rows": rows,
             },
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",

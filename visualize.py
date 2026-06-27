@@ -188,7 +188,15 @@ def plot_existing_figure_grid(
     return str(save_path)
 
 
-def plot_phase3_combined_figures(figure_dir, model_names, seeds, layers, representative_heads, spectral_heads=None):
+def plot_phase3_combined_figures(
+    figure_dir,
+    model_names,
+    seeds,
+    layers,
+    representative_heads,
+    spectral_heads=None,
+    local_attention_windows=None,
+):
     figure_dir = Path(figure_dir)
     source_dir = figure_dir / "detail" / "phase3"
     if not source_dir.exists():
@@ -211,11 +219,16 @@ def plot_phase3_combined_figures(figure_dir, model_names, seeds, layers, represe
             if path:
                 paths.append(path)
 
-        for metric, display, cell_size in [
+        metric_specs = [
             ("entropy", "Attention Entropy by Head", (520, 390)),
             ("distance", "Attention Distance by Head", (520, 390)),
+            ("far_mass", "Far Attention Mass by Head", (520, 390)),
+            ("attention_sink_mass", "Attention Sink Mass by Head", (520, 390)),
             ("toeplitz_deviation", "Toeplitz Deviation by Head", (520, 390)),
-        ]:
+        ]
+        for window in local_attention_windows or []:
+            metric_specs.append((f"local_mass_{window}", f"Local Attention Mass@{window} by Head", (520, 390)))
+        for metric, display, cell_size in metric_specs:
             path = plot_existing_figure_grid(
                 figure_dir=source_dir,
                 model_names=model_names,
@@ -347,6 +360,11 @@ def plot_phase2_summary_figures(raw_metrics_dir, figure_dir):
             ("final_valid_loss_mean", "Final Validation Loss", "loss"),
             ("final_perplexity_mean", "Final Perplexity", "perplexity"),
             ("loss_spike_count_mean", "Loss Spike Count", "count"),
+            ("final_generalization_gap_mean", "Final Generalization Gap", "loss gap"),
+            ("best_final_valid_gap_mean", "Best-Final Validation Gap", "loss gap"),
+            ("valid_loss_auc_mean", "Validation Loss AUC", "loss"),
+            ("step_to_50pct_valid_improvement_mean", "Step to 50% Validation Improvement", "step"),
+            ("step_to_90pct_valid_improvement_mean", "Step to 90% Validation Improvement", "step"),
         ]
         for metric_key, title, ylabel in metric_specs:
             values = [(row["model_name"], row.get(metric_key)) for row in rows if row.get(metric_key) is not None]
@@ -402,6 +420,8 @@ def plot_phase4a_summary_figures(raw_metrics_dir, figure_dir):
             ("validation_mse_mean", "Phase 4a Validation MSE by Layer", "validation MSE"),
             ("explained_variance_mean", "Phase 4a Explained Variance by Layer", "explained variance"),
             ("dead_feature_rate_mean", "Phase 4a Dead Feature Rate by Layer", "dead feature rate"),
+            ("feature_reuse_rate_mean", "Phase 4a Feature Reuse Rate by Layer", "reuse rate"),
+            ("top_feature_activation_frequency_mean", "Phase 4a Top Feature Activation Frequency by Layer", "frequency"),
             ("feature_frequency_entropy_normalized_mean", "Phase 4a Feature Frequency Entropy by Layer", "normalized entropy"),
         ]:
             if any(row.get(metric) is not None for row in rows):
@@ -420,10 +440,27 @@ def plot_phase5_summary_figures(raw_metrics_dir, figure_dir):
     paths = []
     for metric, title, ylabel in [
         ("raw_position_r2_mean", "Phase 5 Raw Position R2", "R2"),
+        ("raw_position_r2_baseline_margin_mean", "Phase 5 Raw Position R2 Baseline Margin", "R2 margin"),
         ("raw_position_bin_accuracy_mean", "Phase 5 Raw Position Bin Accuracy", "accuracy"),
+        ("raw_position_bin_baseline_margin_mean", "Phase 5 Raw Position Bin Baseline Margin", "accuracy margin"),
+        ("raw_segment_position_accuracy_mean", "Phase 5 Raw Segment Position Accuracy", "accuracy"),
+        ("raw_segment_position_baseline_margin_mean", "Phase 5 Raw Segment Position Baseline Margin", "accuracy margin"),
         ("raw_token_category_accuracy_mean", "Phase 5 Raw Token Category Accuracy", "accuracy"),
+        ("raw_token_category_baseline_margin_mean", "Phase 5 Raw Token Category Baseline Margin", "accuracy margin"),
+        ("raw_token_frequency_bin_accuracy_mean", "Phase 5 Raw Token Frequency Bin Accuracy", "accuracy"),
+        ("raw_token_frequency_bin_baseline_margin_mean", "Phase 5 Raw Token Frequency Baseline Margin", "accuracy margin"),
+        ("raw_top_token_identity_accuracy_mean", "Phase 5 Raw Top Token Identity Accuracy", "accuracy"),
+        ("raw_top_token_identity_baseline_margin_mean", "Phase 5 Raw Top Token Identity Baseline Margin", "accuracy margin"),
         ("sae_position_bin_accuracy_mean", "Phase 5 SAE Position Bin Accuracy", "accuracy"),
+        ("sae_position_bin_baseline_margin_mean", "Phase 5 SAE Position Bin Baseline Margin", "accuracy margin"),
+        ("sae_segment_position_accuracy_mean", "Phase 5 SAE Segment Position Accuracy", "accuracy"),
+        ("sae_segment_position_baseline_margin_mean", "Phase 5 SAE Segment Position Baseline Margin", "accuracy margin"),
         ("sae_token_category_accuracy_mean", "Phase 5 SAE Token Category Accuracy", "accuracy"),
+        ("sae_token_category_baseline_margin_mean", "Phase 5 SAE Token Category Baseline Margin", "accuracy margin"),
+        ("sae_token_frequency_bin_accuracy_mean", "Phase 5 SAE Token Frequency Bin Accuracy", "accuracy"),
+        ("sae_token_frequency_bin_baseline_margin_mean", "Phase 5 SAE Token Frequency Baseline Margin", "accuracy margin"),
+        ("sae_top_token_identity_accuracy_mean", "Phase 5 SAE Top Token Identity Accuracy", "accuracy"),
+        ("sae_top_token_identity_baseline_margin_mean", "Phase 5 SAE Top Token Identity Baseline Margin", "accuracy margin"),
         ("mixed_feature_ratio_mean", "Phase 5 Mixed Feature Ratio", "ratio"),
         ("content_only_ratio_mean", "Phase 5 Content-Only Feature Ratio", "ratio"),
         ("position_only_ratio_mean", "Phase 5 Position-Only Feature Ratio", "ratio"),

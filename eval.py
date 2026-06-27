@@ -160,6 +160,17 @@ class Evaluate:
                 bins.append(2)
         return torch.tensor(bins, dtype=torch.long)
 
+    def top_token_identity_labels(self, train_ids, target_ids):
+        counts = {}
+        for token_id in train_ids.tolist():
+            token_id = int(token_id)
+            counts[token_id] = counts.get(token_id, 0) + 1
+        top_n = max(1, int(getattr(self.eval_cfg, "top_token_identity_classes", 32)))
+        top_tokens = [token for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:top_n]]
+        token_to_label = {token: idx for idx, token in enumerate(top_tokens)}
+        other_label = len(top_tokens)
+        return torch.tensor([token_to_label.get(int(token_id), other_label) for token_id in target_ids.tolist()])
+
     def targets(self, train_ids, valid_ids, train_pos, valid_pos, seq_len):
         bins = getattr(self.eval_cfg, "position_bins", 16)
 
@@ -177,6 +188,7 @@ class Evaluate:
                 "segment_position": segment(train_pos),
                 "token_category": self.token_categories(train_ids),
                 "token_frequency_bin": self.frequency_bins(train_ids, train_ids),
+                "top_token_identity": self.top_token_identity_labels(train_ids, train_ids),
             },
             "valid": {
                 "position_bin": position_bin(valid_pos),
@@ -184,6 +196,7 @@ class Evaluate:
                 "segment_position": segment(valid_pos),
                 "token_category": self.token_categories(valid_ids),
                 "token_frequency_bin": self.frequency_bins(train_ids, valid_ids),
+                "top_token_identity": self.top_token_identity_labels(train_ids, valid_ids),
             },
         }
 
@@ -215,7 +228,14 @@ class Evaluate:
             pred = model(valid_x).squeeze(-1)
             ss_res = (valid_y - pred).square().sum()
             ss_tot = (valid_y - valid_y.mean()).square().sum().clamp_min(1e-9)
-            return {"r2": (1.0 - ss_res / ss_tot).item(), "mse": F.mse_loss(pred, valid_y).item()}
+            baseline_pred = torch.full_like(valid_y, train_y.mean())
+            baseline_ss_res = (valid_y - baseline_pred).square().sum()
+            return {
+                "r2": (1.0 - ss_res / ss_tot).item(),
+                "mse": F.mse_loss(pred, valid_y).item(),
+                "baseline_r2": (1.0 - baseline_ss_res / ss_tot).item(),
+                "baseline_mse": F.mse_loss(baseline_pred, valid_y).item(),
+            }
 
     def macro_f1(self, pred, target, num_classes):
         scores = []
@@ -236,7 +256,13 @@ class Evaluate:
         valid_y = torch.tensor([class_map[int(y)] for y in valid_y.tolist()], dtype=torch.long)
         num_classes = len(classes)
         if num_classes < 2:
-            return {"accuracy": 1.0, "macro_f1": 1.0, "num_classes": num_classes}
+            return {
+                "accuracy": 1.0,
+                "macro_f1": 1.0,
+                "majority_baseline_accuracy": 1.0,
+                "baseline_margin": 0.0,
+                "num_classes": num_classes,
+            }
         model = nn.Linear(train_x.size(1), num_classes).to(self.device)
         opt = torch.optim.AdamW(
             model.parameters(),
@@ -256,7 +282,16 @@ class Evaluate:
             pred = model(valid_x).argmax(dim=-1)
             acc = (pred == valid_y).float().mean().item()
             f1 = self.macro_f1(pred.cpu(), valid_y.cpu(), num_classes)
-            return {"accuracy": acc, "macro_f1": f1, "num_classes": num_classes}
+            counts = torch.bincount(train_y.cpu(), minlength=num_classes)
+            majority = int(torch.argmax(counts).item())
+            baseline_acc = (valid_y.cpu() == majority).float().mean().item()
+            return {
+                "accuracy": acc,
+                "macro_f1": f1,
+                "majority_baseline_accuracy": baseline_acc,
+                "baseline_margin": acc - baseline_acc,
+                "num_classes": num_classes,
+            }
 
     def representation_probes(self, train_x, valid_x, targets):
         return {
@@ -274,6 +309,9 @@ class Evaluate:
             ),
             "token_frequency_bin": self.train_classification_probe(
                 train_x, targets["train"]["token_frequency_bin"], valid_x, targets["valid"]["token_frequency_bin"]
+            ),
+            "top_token_identity": self.train_classification_probe(
+                train_x, targets["train"]["top_token_identity"], valid_x, targets["valid"]["top_token_identity"]
             ),
         }
 
@@ -421,11 +459,63 @@ class Evaluate:
                 "model_checkpoint_path": meta.get("model_checkpoint_path"),
                 "model_tokens_seen": meta.get("model_tokens_seen"),
                 "raw_position_r2": raw_probe["normalized_position"]["r2"],
+                "raw_position_r2_baseline": raw_probe["normalized_position"]["baseline_r2"],
+                "raw_position_r2_baseline_margin": raw_probe["normalized_position"]["r2"]
+                - raw_probe["normalized_position"]["baseline_r2"],
                 "raw_position_bin_accuracy": raw_probe["position_bin"]["accuracy"],
+                "raw_position_bin_majority_baseline_accuracy": raw_probe["position_bin"][
+                    "majority_baseline_accuracy"
+                ],
+                "raw_position_bin_baseline_margin": raw_probe["position_bin"]["baseline_margin"],
+                "raw_segment_position_accuracy": raw_probe["segment_position"]["accuracy"],
+                "raw_segment_position_majority_baseline_accuracy": raw_probe["segment_position"][
+                    "majority_baseline_accuracy"
+                ],
+                "raw_segment_position_baseline_margin": raw_probe["segment_position"]["baseline_margin"],
                 "raw_token_category_accuracy": raw_probe["token_category"]["accuracy"],
+                "raw_token_category_majority_baseline_accuracy": raw_probe["token_category"][
+                    "majority_baseline_accuracy"
+                ],
+                "raw_token_category_baseline_margin": raw_probe["token_category"]["baseline_margin"],
+                "raw_token_frequency_bin_accuracy": raw_probe["token_frequency_bin"]["accuracy"],
+                "raw_token_frequency_bin_majority_baseline_accuracy": raw_probe["token_frequency_bin"][
+                    "majority_baseline_accuracy"
+                ],
+                "raw_token_frequency_bin_baseline_margin": raw_probe["token_frequency_bin"]["baseline_margin"],
+                "raw_top_token_identity_accuracy": raw_probe["top_token_identity"]["accuracy"],
+                "raw_top_token_identity_majority_baseline_accuracy": raw_probe["top_token_identity"][
+                    "majority_baseline_accuracy"
+                ],
+                "raw_top_token_identity_baseline_margin": raw_probe["top_token_identity"]["baseline_margin"],
                 "sae_position_r2": sae_probe["normalized_position"]["r2"],
+                "sae_position_r2_baseline": sae_probe["normalized_position"]["baseline_r2"],
+                "sae_position_r2_baseline_margin": sae_probe["normalized_position"]["r2"]
+                - sae_probe["normalized_position"]["baseline_r2"],
                 "sae_position_bin_accuracy": sae_probe["position_bin"]["accuracy"],
+                "sae_position_bin_majority_baseline_accuracy": sae_probe["position_bin"][
+                    "majority_baseline_accuracy"
+                ],
+                "sae_position_bin_baseline_margin": sae_probe["position_bin"]["baseline_margin"],
+                "sae_segment_position_accuracy": sae_probe["segment_position"]["accuracy"],
+                "sae_segment_position_majority_baseline_accuracy": sae_probe["segment_position"][
+                    "majority_baseline_accuracy"
+                ],
+                "sae_segment_position_baseline_margin": sae_probe["segment_position"]["baseline_margin"],
                 "sae_token_category_accuracy": sae_probe["token_category"]["accuracy"],
+                "sae_token_category_majority_baseline_accuracy": sae_probe["token_category"][
+                    "majority_baseline_accuracy"
+                ],
+                "sae_token_category_baseline_margin": sae_probe["token_category"]["baseline_margin"],
+                "sae_token_frequency_bin_accuracy": sae_probe["token_frequency_bin"]["accuracy"],
+                "sae_token_frequency_bin_majority_baseline_accuracy": sae_probe["token_frequency_bin"][
+                    "majority_baseline_accuracy"
+                ],
+                "sae_token_frequency_bin_baseline_margin": sae_probe["token_frequency_bin"]["baseline_margin"],
+                "sae_top_token_identity_accuracy": sae_probe["top_token_identity"]["accuracy"],
+                "sae_top_token_identity_majority_baseline_accuracy": sae_probe["top_token_identity"][
+                    "majority_baseline_accuracy"
+                ],
+                "sae_top_token_identity_baseline_margin": sae_probe["top_token_identity"]["baseline_margin"],
                 **feature_scores["summary"],
             }
             rows.append(row)
@@ -440,11 +530,41 @@ class Evaluate:
     def summarize(self, rows):
         metrics = [
             "raw_position_r2",
+            "raw_position_r2_baseline",
+            "raw_position_r2_baseline_margin",
             "raw_position_bin_accuracy",
+            "raw_position_bin_majority_baseline_accuracy",
+            "raw_position_bin_baseline_margin",
+            "raw_segment_position_accuracy",
+            "raw_segment_position_majority_baseline_accuracy",
+            "raw_segment_position_baseline_margin",
             "raw_token_category_accuracy",
+            "raw_token_category_majority_baseline_accuracy",
+            "raw_token_category_baseline_margin",
+            "raw_token_frequency_bin_accuracy",
+            "raw_token_frequency_bin_majority_baseline_accuracy",
+            "raw_token_frequency_bin_baseline_margin",
+            "raw_top_token_identity_accuracy",
+            "raw_top_token_identity_majority_baseline_accuracy",
+            "raw_top_token_identity_baseline_margin",
             "sae_position_r2",
+            "sae_position_r2_baseline",
+            "sae_position_r2_baseline_margin",
             "sae_position_bin_accuracy",
+            "sae_position_bin_majority_baseline_accuracy",
+            "sae_position_bin_baseline_margin",
+            "sae_segment_position_accuracy",
+            "sae_segment_position_majority_baseline_accuracy",
+            "sae_segment_position_baseline_margin",
             "sae_token_category_accuracy",
+            "sae_token_category_majority_baseline_accuracy",
+            "sae_token_category_baseline_margin",
+            "sae_token_frequency_bin_accuracy",
+            "sae_token_frequency_bin_majority_baseline_accuracy",
+            "sae_token_frequency_bin_baseline_margin",
+            "sae_top_token_identity_accuracy",
+            "sae_top_token_identity_majority_baseline_accuracy",
+            "sae_top_token_identity_baseline_margin",
             "mixed_feature_ratio",
             "content_only_ratio",
             "position_only_ratio",
@@ -507,11 +627,12 @@ class Evaluate:
                 "max_probe_train_tokens": getattr(self.eval_cfg, "max_probe_train_tokens", 8192),
                 "max_probe_valid_tokens": getattr(self.eval_cfg, "max_probe_valid_tokens", 4096),
                 "position_bins": getattr(self.eval_cfg, "position_bins", 16),
+                "top_token_identity_classes": getattr(self.eval_cfg, "top_token_identity_classes", 32),
                 "feature_activation_bins": getattr(self.eval_cfg, "feature_activation_bins", 10),
                 "selectivity_quantile": getattr(self.eval_cfg, "selectivity_quantile", 0.9),
-                "top_token_identity": "deferred",
+                "top_token_identity": "top-N frequent train tokens plus other",
+                "probe_baselines": "mean baseline for regression and train-majority baseline for classification",
                 "pos_tag_probe": "deferred",
-                "permutation_baseline": "deferred",
             },
             "summary_rows": summary,
             "run_rows": all_rows,

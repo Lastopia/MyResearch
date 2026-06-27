@@ -108,6 +108,7 @@ class Train:
             "require_final_checkpoints_for_phase3",
             "local_attention_windows",
             "long_range_fraction",
+            "attention_sink_tokens",
             "spectral_topk_values",
             "spectral_analysis_layers",
             "spectral_analysis_heads",
@@ -790,6 +791,13 @@ class Train:
             "best_valid_loss",
             "final_valid_loss",
             "final_perplexity",
+            "final_generalization_gap",
+            "best_final_valid_gap",
+            "valid_loss_early_slope",
+            "valid_loss_late_slope",
+            "valid_loss_auc",
+            "step_to_50pct_valid_improvement",
+            "step_to_90pct_valid_improvement",
             "grad_norm_mean",
             "grad_norm_variance",
             "train_loss_variance",
@@ -864,6 +872,77 @@ class Train:
                     }
                 )
         return rows
+
+    def nearest_train_loss(self, history, step):
+        train_points = [
+            (row["step"], row["train_loss"])
+            for row in history
+            if "train_loss" in row and row.get("step") is not None
+        ]
+        if not train_points:
+            return None
+        return min(train_points, key=lambda item: abs(item[0] - step))[1]
+
+    def slope_between(self, points, left_idx, right_idx):
+        if len(points) < 2:
+            return None
+        left_idx = max(0, min(left_idx, len(points) - 1))
+        right_idx = max(0, min(right_idx, len(points) - 1))
+        if left_idx == right_idx:
+            return None
+        x0, y0 = points[left_idx]
+        x1, y1 = points[right_idx]
+        return None if x1 == x0 else (y1 - y0) / (x1 - x0)
+
+    def trapezoid_auc(self, points):
+        if len(points) < 2:
+            return None
+        area = 0.0
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            area += (x1 - x0) * (y0 + y1) / 2.0
+        return area / max(points[-1][0] - points[0][0], 1)
+
+    def step_to_fractional_improvement(self, points, fraction):
+        if len(points) < 2:
+            return None
+        start = points[0][1]
+        best = min(value for _, value in points)
+        target = start - (start - best) * fraction
+        for step, value in points:
+            if value <= target:
+                return step
+        return None
+
+    def convergence_metrics(self, state):
+        history = state.get("history", [])
+        valid_points = [
+            (row["step"], row["valid_loss"])
+            for row in history
+            if "valid_loss" in row and row.get("step") is not None
+        ]
+        valid_points = sorted(valid_points)
+        final_step = state.get("final_step") or state.get("checkpoint_step")
+        final_train_loss = self.nearest_train_loss(history, final_step)
+        final_valid_loss = state.get("final_valid_loss")
+        split = max(1, len(valid_points) // 2)
+        return {
+            "final_train_loss_nearest": final_train_loss,
+            "final_generalization_gap": (
+                final_valid_loss - final_train_loss
+                if final_valid_loss is not None and final_train_loss is not None
+                else None
+            ),
+            "best_final_valid_gap": (
+                final_valid_loss - state.get("best_valid_loss")
+                if final_valid_loss is not None and state.get("best_valid_loss") is not None
+                else None
+            ),
+            "valid_loss_early_slope": self.slope_between(valid_points, 0, split),
+            "valid_loss_late_slope": self.slope_between(valid_points, split, len(valid_points) - 1),
+            "valid_loss_auc": self.trapezoid_auc(valid_points),
+            "step_to_50pct_valid_improvement": self.step_to_fractional_improvement(valid_points, 0.5),
+            "step_to_90pct_valid_improvement": self.step_to_fractional_improvement(valid_points, 0.9),
+        }
 
     def validation_loss_match_target(self, serializable):
         configured = getattr(self.train_cfg, "validation_loss_match_target", None)
@@ -941,6 +1020,14 @@ class Train:
                 "best_valid_loss": [],
                 "final_valid_loss": [],
                 "final_perplexity": [],
+                "final_train_loss_nearest": [],
+                "final_generalization_gap": [],
+                "best_final_valid_gap": [],
+                "valid_loss_early_slope": [],
+                "valid_loss_late_slope": [],
+                "valid_loss_auc": [],
+                "step_to_50pct_valid_improvement": [],
+                "step_to_90pct_valid_improvement": [],
                 "grad_norm_mean": [],
                 "grad_norm_variance": [],
                 "train_loss_variance": [],
@@ -954,12 +1041,14 @@ class Train:
             for seed, item in seed_items.items():
                 state = item["train_state"]
                 stability = state["stability"]
+                convergence = self.convergence_metrics(state)
                 row = {
                     "model_name": model_name,
                     "seed": seed,
                     "best_valid_loss": state["best_valid_loss"],
                     "final_valid_loss": state["final_valid_loss"],
                     "final_perplexity": state["final_perplexity"],
+                    **convergence,
                     "grad_norm_mean": stability["grad_norm_mean"],
                     "grad_norm_variance": stability["grad_norm_variance"],
                     "train_loss_variance": stability["train_loss_variance"],
@@ -1083,6 +1172,53 @@ class Train:
             self.logger.log_stage_end(f"Phase 2 summary figures: wrote {len(paths)} overview files")
         return paths
 
+    def head_vector_correlation(self, xs, ys):
+        pairs = [
+            (float(x), float(y))
+            for x, y in zip(xs, ys)
+            if x is not None and y is not None and math.isfinite(x) and math.isfinite(y)
+        ]
+        if len(pairs) < 2:
+            return None
+        x_vals = [x for x, _ in pairs]
+        y_vals = [y for _, y in pairs]
+        x_mean = sum(x_vals) / len(x_vals)
+        y_mean = sum(y_vals) / len(y_vals)
+        num = sum((x - x_mean) * (y - y_mean) for x, y in pairs)
+        den_x = math.sqrt(sum((x - x_mean) ** 2 for x in x_vals))
+        den_y = math.sqrt(sum((y - y_mean) ** 2 for y in y_vals))
+        den = den_x * den_y
+        return None if den <= 0 else num / den
+
+    def head_pattern_consistency_from_headwise(self, headwise):
+        layers = sorted(int(layer) for layer in headwise)
+        metrics = sorted({metric for layer_metrics in headwise.values() for metric in layer_metrics})
+        result = {}
+        for metric in metrics:
+            all_corrs = []
+            adjacent_corrs = []
+            for left_idx, left in enumerate(layers):
+                left_values = headwise.get(str(left), {}).get(metric)
+                if not left_values:
+                    continue
+                for right in layers[left_idx + 1 :]:
+                    right_values = headwise.get(str(right), {}).get(metric)
+                    if not right_values:
+                        continue
+                    corr = self.head_vector_correlation(left_values, right_values)
+                    if corr is None:
+                        continue
+                    all_corrs.append(corr)
+                    if right == left + 1:
+                        adjacent_corrs.append(corr)
+            result[metric] = {
+                "all_layer_pair_corr": mean_std(all_corrs),
+                "adjacent_layer_corr": mean_std(adjacent_corrs),
+                "n_layer_pairs": len(all_corrs),
+                "n_adjacent_pairs": len(adjacent_corrs),
+            }
+        return result
+
     def summarize_phase3(self, serializable):
         metric_names = ["attn_entropy", "attn_distance", "toeplitz_deviation"]
         spectral_key = f"spectral_concentration_top{max(getattr(self.train_cfg, 'spectral_topk_values', [8]))}"
@@ -1090,8 +1226,12 @@ class Train:
         by_model = {}
         layer_rows = []
         taxonomy_rows = []
+        pattern_rows = []
         for model_name, seed_items in serializable.items():
-            by_model.setdefault(model_name, {"layer_wise": {}, "stage_wise": {}, "taxonomy_counts": {}})
+            by_model.setdefault(
+                model_name,
+                {"layer_wise": {}, "stage_wise": {}, "taxonomy_counts": {}, "head_pattern_consistency": {}},
+            )
             for seed, item in seed_items.items():
                 phase3 = item["analysis_res"].get("phase3", {})
                 layer_wise = phase3.get("layer_wise", {})
@@ -1109,11 +1249,58 @@ class Train:
                                 "value": value,
                             }
                         )
+                for layer, metrics in phase3.get("head_wise", {}).items():
+                    for metric, values in metrics.items():
+                        clean = [
+                            value
+                            for value in values
+                            if value is not None and isinstance(value, (int, float)) and math.isfinite(value)
+                        ]
+                        if not clean:
+                            continue
+                        value = sum(clean) / len(clean)
+                        summary_metric = f"head_mean_{metric}"
+                        by_model[model_name]["layer_wise"].setdefault(summary_metric, {}).setdefault(layer, []).append(
+                            value
+                        )
+                        layer_rows.append(
+                            {
+                                "model_name": model_name,
+                                "seed": seed,
+                                "metric": summary_metric,
+                                "layer": layer,
+                                "value": value,
+                            }
+                        )
                 for stage, metrics in phase3.get("layer_group_summary", {}).items():
                     for metric, stats in metrics.items():
                         by_model[model_name]["stage_wise"].setdefault(stage, {}).setdefault(metric, []).append(
                             stats["mean"]
                         )
+                pattern_consistency = phase3.get("head_pattern_consistency")
+                if not pattern_consistency:
+                    pattern_consistency = self.head_pattern_consistency_from_headwise(phase3.get("head_wise", {}))
+                for metric, stats in pattern_consistency.items():
+                    all_pair = stats.get("all_layer_pair_corr", {})
+                    adjacent = stats.get("adjacent_layer_corr", {})
+                    row = {
+                        "model_name": model_name,
+                        "seed": seed,
+                        "metric": metric,
+                        "all_layer_pair_corr_mean": all_pair.get("mean"),
+                        "all_layer_pair_corr_std": all_pair.get("std"),
+                        "adjacent_layer_corr_mean": adjacent.get("mean"),
+                        "adjacent_layer_corr_std": adjacent.get("std"),
+                        "n_layer_pairs": stats.get("n_layer_pairs"),
+                        "n_adjacent_pairs": stats.get("n_adjacent_pairs"),
+                    }
+                    pattern_rows.append(row)
+                    for key in ["all_layer_pair_corr_mean", "adjacent_layer_corr_mean"]:
+                        value = row.get(key)
+                        if value is not None and math.isfinite(value):
+                            by_model[model_name]["head_pattern_consistency"].setdefault(metric, {}).setdefault(
+                                key, []
+                            ).append(value)
                 counts = phase3.get("head_taxonomy", {}).get("counts", {})
                 for label, count in counts.items():
                     by_model[model_name]["taxonomy_counts"].setdefault(label, []).append(count)
@@ -1140,8 +1327,17 @@ class Train:
                 "taxonomy_counts": {
                     label: mean_std(values) for label, values in model_item["taxonomy_counts"].items()
                 },
+                "head_pattern_consistency": {
+                    metric: {name: mean_std(values) for name, values in metric_values.items()}
+                    for metric, metric_values in model_item["head_pattern_consistency"].items()
+                },
             }
-        return {"by_model": summary, "layer_rows": layer_rows, "taxonomy_rows": taxonomy_rows}
+        return {
+            "by_model": summary,
+            "layer_rows": layer_rows,
+            "taxonomy_rows": taxonomy_rows,
+            "head_pattern_consistency_rows": pattern_rows,
+        }
 
     def write_phase3_summary_tables(self, phase3_summary):
         write_csv(
@@ -1151,6 +1347,10 @@ class Train:
         write_csv(
             phase3_summary["taxonomy_rows"],
             Path(PATH.table_dir) / "phase3_taxonomy_counts.csv",
+        )
+        write_csv(
+            phase3_summary.get("head_pattern_consistency_rows", []),
+            Path(PATH.table_dir) / "phase3_head_pattern_consistency.csv",
         )
 
     def plot_phase3_combined_figures(self):
@@ -1172,6 +1372,7 @@ class Train:
             layers=layers,
             representative_heads=heads,
             spectral_heads=spectral_heads,
+            local_attention_windows=getattr(self.train_cfg, "local_attention_windows", [4, 16, 64]),
         )
         if paths:
             self.logger.log_stage_end(f"Phase 3 combined figures: wrote {len(paths)} overview files")
