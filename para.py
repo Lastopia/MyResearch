@@ -129,19 +129,30 @@ TRAIN = SimpleNamespace(
 )
 
 SAE = SimpleNamespace(
-    # Phase 4a only: fixed SAE capacity/sparsity for the main matched comparison.
-    # Dictionary-size and k sweeps are intentionally left as later extensions.
+    # Phase 4a main matched comparison plus bounded one-axis sweeps.
+    # `sweep_configs` avoids a full dictionary_size x top-k x seed Cartesian
+    # product. The main config runs multiple SAE seeds for stability; the extra
+    # sweep configs run a single seed unless explicitly listed otherwise.
     sae_type="topk",
     activation_site="residual_post_block",
     layers=[2, 6, 10],
+    primary_dictionary_size=4096,
+    primary_topk=64,
     dictionary_sizes=[4096],
     topk_values=[64],
+    sweep_configs=[
+        {"dict_size": 2048, "k": 64, "seeds": [42]},
+        {"dict_size": 4096, "k": 64, "seeds": [42, 43, 44]},
+        {"dict_size": 8192, "k": 64, "seeds": [42]},
+        {"dict_size": 4096, "k": 32, "seeds": [42]},
+        {"dict_size": 4096, "k": 128, "seeds": [42]},
+    ],
     device="cuda",
     activation_batch_size=4,
     batch_size=2048,
     lr=2e-3,
     steps=2000,
-    seeds=[42],
+    seeds=[42, 43, 44],
     max_activation_tokens=65536,
     max_validation_activation_tokens=16384,
     normalize_activations=True,
@@ -152,6 +163,11 @@ SAE = SimpleNamespace(
     eval_interval=200,
     dead_feature_threshold=0.0,
     feature_reuse_frequency_threshold=0.001,
+    run_feature_stability=True,
+    stability_dict_sizes=[4096],
+    stability_topk_values=[64],
+    stability_max_tokens=4096,
+    stability_similarity_thresholds=[0.5, 0.7, 0.9],
 )
 
 EVAL = SimpleNamespace(
@@ -163,6 +179,8 @@ EVAL = SimpleNamespace(
     run_correlation=True,
     run_feature_selectivity=True,
     layers=[2, 6, 10],
+    eval_dict_sizes=[4096],
+    eval_topk_values=[64],
     max_probe_train_tokens=8192,
     max_probe_valid_tokens=4096,
     probe_steps=200,
@@ -175,6 +193,11 @@ EVAL = SimpleNamespace(
     selectivity_quantile=0.9,
     correlation_feature_sample=512,
     run_top_token_identity=True,
+    run_feature_case_study=True,
+    case_study_features_per_label=5,
+    case_study_contexts_per_feature=6,
+    case_study_context_window=8,
+    case_study_labels=["content_only", "position_only", "mixed", "low_selectivity"],
     skip_completed_stage=True,
 )
 

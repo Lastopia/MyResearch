@@ -59,14 +59,43 @@ class Evaluate:
             "data_meta": self.data_res.get("meta", {}),
         }
 
+    def selected_sae_items(self, sae_items):
+        dict_sizes = {int(x) for x in getattr(self.eval_cfg, "eval_dict_sizes", [])}
+        topks = {int(x) for x in getattr(self.eval_cfg, "eval_topk_values", [])}
+        selected = []
+        for item in sae_items:
+            meta = item.get("meta", {})
+            dict_size = int(meta.get("dict_size"))
+            k = int(meta.get("k"))
+            if dict_sizes and dict_size not in dict_sizes:
+                continue
+            if topks and k not in topks:
+                continue
+            selected.append(item)
+        return selected
+
     def stage_outputs(self):
-        return [
+        outputs = [
             Path(PATH.raw_metrics_dir) / "eval_res.json",
             Path(PATH.raw_metrics_dir) / "phase5_summary.json",
             Path(PATH.table_dir) / "phase5_disentanglement_runs.csv",
             Path(PATH.table_dir) / "phase5_disentanglement_summary.csv",
             Path(PATH.table_dir) / "phase5_feature_scores.csv",
         ]
+        if getattr(self.eval_cfg, "run_feature_case_study", True):
+            outputs.extend(
+                [
+                    Path(PATH.raw_metrics_dir) / "phase5_feature_case_studies.json",
+                    Path(PATH.table_dir) / "phase5_feature_case_studies.csv",
+                ]
+            )
+        outputs.extend(
+            [
+                Path(PATH.raw_metrics_dir) / "phase5_feature_overlap_across_sae_seeds.json",
+                Path(PATH.table_dir) / "phase5_feature_overlap_across_sae_seeds.csv",
+            ]
+        )
+        return outputs
 
     def stage_manifest_path(self):
         return Path(PATH.raw_metrics_dir) / "eval_manifest.json"
@@ -425,6 +454,177 @@ class Evaluate:
             ],
         }
 
+    def decode_tokens(self, token_ids):
+        tokenizer = self.data_res.get("tokenizer")
+        ids = [int(x) for x in token_ids.tolist()]
+        if hasattr(tokenizer, "decode"):
+            return tokenizer.decode(ids)
+        return " ".join(self.token_to_text(token_id) for token_id in ids)
+
+    def feature_selection_score(self, row, label):
+        if label == "content_only":
+            return row["content_score"]
+        if label == "position_only":
+            return row["position_score"]
+        if label == "mixed":
+            return row["content_score"] + row["position_score"]
+        return max(row["content_score"], row["position_score"])
+
+    def feature_case_studies(self, features, valid_raw, feature_rows, meta):
+        if not getattr(self.eval_cfg, "run_feature_case_study", True):
+            return []
+        labels = list(getattr(self.eval_cfg, "case_study_labels", ["content_only", "position_only", "mixed"]))
+        features_per_label = int(getattr(self.eval_cfg, "case_study_features_per_label", 5))
+        contexts_per_feature = int(getattr(self.eval_cfg, "case_study_contexts_per_feature", 6))
+        window = int(getattr(self.eval_cfg, "case_study_context_window", 8))
+        token_ids = valid_raw["token_ids"]
+        positions = valid_raw["positions"]
+        seq_len = int(positions.max().item()) + 1
+        rows = []
+
+        by_label = {label: [] for label in labels}
+        for row in feature_rows:
+            label = row.get("label")
+            if label in by_label:
+                by_label[label].append(row)
+
+        for label, candidates in by_label.items():
+            ranked = sorted(candidates, key=lambda row: self.feature_selection_score(row, label), reverse=True)
+            for feature_row in ranked[:features_per_label]:
+                feature_idx = int(feature_row["feature"])
+                values = features[:, feature_idx].float()
+                active = values > 0
+                if not active.any():
+                    continue
+                top_values, top_indices = torch.topk(values, k=min(contexts_per_feature, values.numel()))
+                for rank, (value, flat_idx) in enumerate(zip(top_values.tolist(), top_indices.tolist()), start=1):
+                    pos = int(positions[flat_idx].item())
+                    left = flat_idx - min(pos, window)
+                    right = flat_idx + min(seq_len - pos - 1, window) + 1
+                    rows.append(
+                        {
+                            "model_name": meta["model_name"],
+                            "model_seed": meta["model_seed"],
+                            "layer": meta["layer"],
+                            "sae_seed": meta["sae_seed"],
+                            "dict_size": meta["dict_size"],
+                            "k": meta["k"],
+                            "feature": feature_idx,
+                            "label": label,
+                            "case_rank": rank,
+                            "activation_value": float(value),
+                            "position": pos,
+                            "token_id": int(token_ids[flat_idx].item()),
+                            "center_token_text": self.token_to_text(int(token_ids[flat_idx].item())),
+                            "context": self.decode_tokens(token_ids[left:right]),
+                            "content_score": feature_row["content_score"],
+                            "position_score": feature_row["position_score"],
+                            "position_corr": feature_row["position_corr"],
+                            "position_mi": feature_row["position_mi"],
+                            "content_category_mi": feature_row["content_category_mi"],
+                            "content_frequency_mi": feature_row["content_frequency_mi"],
+                        }
+                    )
+        return rows
+
+    def decoder_columns(self, sae):
+        weight = sae.decoder.weight.detach().float().cpu()
+        return F.normalize(weight.T, dim=1)
+
+    def mutual_nearest_matches(self, sim):
+        a_to_b = sim.argmax(dim=1)
+        b_to_a = sim.argmax(dim=0)
+        a_idx = torch.arange(sim.size(0))
+        keep = b_to_a[a_to_b] == a_idx
+        matched_a = a_idx[keep]
+        matched_b = a_to_b[keep]
+        scores = sim[matched_a, matched_b]
+        return matched_a, matched_b, scores
+
+    def feature_overlap_across_sae_seeds(self, feature_rows):
+        labels = list(getattr(self.eval_cfg, "case_study_labels", ["content_only", "position_only", "mixed"]))
+        labels = list(dict.fromkeys(labels + ["low_selectivity", "dead"]))
+        eval_dict_sizes = {int(x) for x in getattr(self.eval_cfg, "eval_dict_sizes", [])}
+        eval_topks = {int(x) for x in getattr(self.eval_cfg, "eval_topk_values", [])}
+        label_lookup = {}
+        for row in feature_rows:
+            key = (
+                row["model_name"],
+                int(row["model_seed"]),
+                int(row["layer"]),
+                int(row["dict_size"]),
+                int(row["k"]),
+                int(row["sae_seed"]),
+                int(row["feature"]),
+            )
+            label_lookup[key] = row["label"]
+
+        rows = []
+        for model_name, seed_items in self.sae_res.items():
+            for model_seed, layer_items in seed_items.items():
+                for layer, items in layer_items.items():
+                    grouped = {}
+                    for item in items:
+                        meta = item.get("meta", {})
+                        key = (int(meta["dict_size"]), int(meta["k"]))
+                        if eval_dict_sizes and key[0] not in eval_dict_sizes:
+                            continue
+                        if eval_topks and key[1] not in eval_topks:
+                            continue
+                        grouped.setdefault(key, []).append(item)
+                    for (dict_size, k), group_items in grouped.items():
+                        if len(group_items) < 2:
+                            continue
+                        loaded = []
+                        for item in sorted(group_items, key=lambda x: x["meta"]["sae_seed"]):
+                            loaded_item = load_sae_item(item, self.device)
+                            loaded.append(
+                                {
+                                    "seed": int(loaded_item["meta"]["sae_seed"]),
+                                    "decoder": self.decoder_columns(loaded_item["sae"]),
+                                }
+                            )
+                        for left_idx in range(len(loaded)):
+                            for right_idx in range(left_idx + 1, len(loaded)):
+                                left = loaded[left_idx]
+                                right = loaded[right_idx]
+                                sim = left["decoder"] @ right["decoder"].T
+                                matched_a, matched_b, scores = self.mutual_nearest_matches(sim)
+                                if matched_a.numel() == 0:
+                                    continue
+                                label_pairs = []
+                                for feat_a, feat_b in zip(matched_a.tolist(), matched_b.tolist()):
+                                    label_a = label_lookup.get(
+                                        (model_name, int(model_seed), int(layer), dict_size, k, left["seed"], int(feat_a))
+                                    )
+                                    label_b = label_lookup.get(
+                                        (model_name, int(model_seed), int(layer), dict_size, k, right["seed"], int(feat_b))
+                                    )
+                                    if label_a is not None and label_b is not None:
+                                        label_pairs.append((label_a, label_b))
+                                if not label_pairs:
+                                    continue
+                                same = sum(1 for label_a, label_b in label_pairs if label_a == label_b)
+                                row = {
+                                    "model_name": model_name,
+                                    "model_seed": int(model_seed),
+                                    "layer": int(layer),
+                                    "dict_size": dict_size,
+                                    "k": k,
+                                    "sae_seed_a": left["seed"],
+                                    "sae_seed_b": right["seed"],
+                                    "matched_feature_count": len(label_pairs),
+                                    "same_label_fraction": same / len(label_pairs),
+                                    "decoder_cosine_mean": scores.mean().item(),
+                                    "decoder_cosine_median": scores.median().item(),
+                                }
+                                for label in labels:
+                                    denom = sum(1 for label_a, _ in label_pairs if label_a == label)
+                                    keep = sum(1 for label_a, label_b in label_pairs if label_a == label and label_b == label)
+                                    row[f"{label}_preservation_fraction"] = keep / denom if denom else None
+                                rows.append(row)
+        return rows
+
     def run_one(self, model_name, model_seed, layer, train_item, sae_items):
         model = train_item["model"].to(self.device)
         train_raw = self.collect_raw(model, layer, "train", getattr(self.eval_cfg, "max_probe_train_tokens", 8192))
@@ -437,7 +637,7 @@ class Evaluate:
             train_raw["positions"].max().item() + 1,
         )
         raw_probe = self.representation_probes(train_raw["acts"], valid_raw["acts"], targets)
-        rows, feature_rows = [], []
+        rows, feature_rows, case_rows = [], [], []
         for sae_item in sae_items:
             sae_item = load_sae_item(sae_item, self.device)
             sae = sae_item["sae"].to(self.device)
@@ -520,11 +720,21 @@ class Evaluate:
             }
             rows.append(row)
             for feature_row in feature_scores["feature_rows"]:
-                feature_rows.append({**{k: row[k] for k in ["model_name", "model_seed", "layer", "sae_seed"]}, **feature_row})
+                feature_rows.append(
+                    {
+                        **{
+                            k: row[k]
+                            for k in ["model_name", "model_seed", "layer", "sae_seed", "dict_size", "k"]
+                        },
+                        **feature_row,
+                    }
+                )
+            case_rows.extend(self.feature_case_studies(valid_features, valid_raw, feature_scores["feature_rows"], row))
         return {
             "raw_probe": raw_probe,
             "rows": rows,
             "feature_rows": feature_rows,
+            "case_rows": case_rows,
         }
 
     def summarize(self, rows):
@@ -598,7 +808,7 @@ class Evaluate:
             plot_phase5_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
             return load_json(Path(PATH.raw_metrics_dir) / "eval_res.json")
 
-        all_rows, all_feature_rows, nested = [], [], {}
+        all_rows, all_feature_rows, all_case_rows, nested = [], [], [], {}
         layers = getattr(self.eval_cfg, "layers", [2, 6, 10])
         for model_name, seeds in self.train_res.items():
             nested[model_name] = {}
@@ -607,12 +817,15 @@ class Evaluate:
                 for layer in layers:
                     if layer not in self.sae_res.get(model_name, {}).get(model_seed, {}):
                         continue
+                    selected_sae_items = self.selected_sae_items(self.sae_res[model_name][model_seed][layer])
+                    if not selected_sae_items:
+                        continue
                     one = self.run_one(
                         model_name,
                         model_seed,
                         layer,
                         train_item,
-                        self.sae_res[model_name][model_seed][layer],
+                        selected_sae_items,
                     )
                     nested[model_name][str(model_seed)][str(layer)] = {
                         "raw_probe": one["raw_probe"],
@@ -620,6 +833,7 @@ class Evaluate:
                     }
                     all_rows.extend(one["rows"])
                     all_feature_rows.extend(one["feature_rows"])
+                    all_case_rows.extend(one["case_rows"])
         summary = self.summarize(all_rows)
         eval_res = {
             "phase": "5",
@@ -643,6 +857,34 @@ class Evaluate:
         write_csv(all_rows, Path(PATH.table_dir) / "phase5_disentanglement_runs.csv")
         write_csv(summary, Path(PATH.table_dir) / "phase5_disentanglement_summary.csv")
         write_csv(all_feature_rows, Path(PATH.table_dir) / "phase5_feature_scores.csv")
+        if getattr(self.eval_cfg, "run_feature_case_study", True):
+            save_json(
+                {
+                    "phase": "5_case_study",
+                    "design": {
+                        "features_per_label": getattr(self.eval_cfg, "case_study_features_per_label", 5),
+                        "contexts_per_feature": getattr(self.eval_cfg, "case_study_contexts_per_feature", 6),
+                        "context_window": getattr(self.eval_cfg, "case_study_context_window", 8),
+                        "labels": list(getattr(self.eval_cfg, "case_study_labels", [])),
+                    },
+                    "rows": all_case_rows,
+                },
+                Path(PATH.raw_metrics_dir) / "phase5_feature_case_studies.json",
+            )
+            write_csv(all_case_rows, Path(PATH.table_dir) / "phase5_feature_case_studies.csv")
+        overlap_rows = self.feature_overlap_across_sae_seeds(all_feature_rows)
+        save_json(
+            {
+                "phase": "5_feature_overlap",
+                "design": {
+                    "matching": "mutual_nearest_neighbor_on_decoder_cosine",
+                    "overlap": "label preservation after automatic SAE feature matching",
+                },
+                "rows": overlap_rows,
+            },
+            Path(PATH.raw_metrics_dir) / "phase5_feature_overlap_across_sae_seeds.json",
+        )
+        write_csv(overlap_rows, Path(PATH.table_dir) / "phase5_feature_overlap_across_sae_seeds.csv")
         plot_phase5_summary_figures(PATH.raw_metrics_dir, PATH.figure_dir)
         save_manifest(self.stage_manifest_path(), "eval", self.stage_config(), self.stage_outputs())
         return eval_res

@@ -19,7 +19,7 @@ from model import SelfTransformer
 from para import (DATA,EVAL,INTERP,MODEL,PATH,SAE,SECRETS,TRAIN,REMARK)
 from sae import SelfSAE
 from train import Train
-from utils import (ensure_dirs,load_json,manifest_is_current,namespace_to_dict,runtime_environment_info,save_json,save_manifest)
+from utils import (ensure_dirs,load_json,manifest_is_current,namespace_to_dict,runtime_environment_info,save_json,save_manifest,write_csv)
 
 
 # Pipeline switches. Turning a stage off does not fabricate its output:
@@ -128,6 +128,82 @@ def final_model_checkpoints_exist():
     return True
 
 
+def train_checkpoint_snapshot():
+    rows = {}
+    model_dir = Path(PATH.ckpt_dir) / "models"
+    for model_name in MODEL.model_names:
+        for seed in TRAIN.seeds:
+            path = model_dir / f"{model_name}_seed{seed}_step{TRAIN.steps}.pt"
+            key = f"{model_name}:{seed}"
+            if path.exists() and path.is_file():
+                stat = path.stat()
+                rows[key] = {
+                    "model_name": model_name,
+                    "seed": seed,
+                    "checkpoint_path": str(path),
+                    "exists": True,
+                    "size_bytes": stat.st_size,
+                    "modified_time": stat.st_mtime,
+                }
+            else:
+                rows[key] = {
+                    "model_name": model_name,
+                    "seed": seed,
+                    "checkpoint_path": str(path),
+                    "exists": False,
+                    "size_bytes": None,
+                    "modified_time": None,
+                }
+    return rows
+
+
+def write_train_checkpoint_reuse_audit(before, after, train_res):
+    rows = []
+    for key, after_item in after.items():
+        before_item = before.get(key, {})
+        model_name = after_item["model_name"]
+        seed = int(after_item["seed"])
+        state = train_res.get(model_name, {}).get(seed, {}).get("train_state", {}) if train_res else {}
+        selection = state.get("checkpoint_selection", {})
+        primary = selection.get("primary", {})
+        modified = (
+            before_item.get("exists") != after_item.get("exists")
+            or before_item.get("size_bytes") != after_item.get("size_bytes")
+            or before_item.get("modified_time") != after_item.get("modified_time")
+        )
+        rows.append(
+            {
+                "model_name": model_name,
+                "seed": seed,
+                "expected_final_checkpoint_path": after_item["checkpoint_path"],
+                "checkpoint_exists_before_run": before_item.get("exists", False),
+                "checkpoint_exists_after_run": after_item.get("exists", False),
+                "checkpoint_modified_during_this_run": modified,
+                "reused_without_retraining": after_item.get("exists", False) and not modified,
+                "checkpoint_size_before_bytes": before_item.get("size_bytes"),
+                "checkpoint_size_after_bytes": after_item.get("size_bytes"),
+                "checkpoint_mtime_before": before_item.get("modified_time"),
+                "checkpoint_mtime_after": after_item.get("modified_time"),
+                "selected_checkpoint_rule": primary.get("selection_rule"),
+                "selected_checkpoint_step": primary.get("checkpoint_step"),
+                "selected_checkpoint_path": primary.get("checkpoint_path"),
+                "tokens_seen": primary.get("tokens_seen") or state.get("tokens_seen"),
+            }
+        )
+    result = {
+        "purpose": "Audit whether this pipeline invocation reused existing base-model checkpoints.",
+        "interpretation": (
+            "reused_without_retraining=true means the expected final checkpoint existed before this run "
+            "and its size/mtime did not change during this run. false means the checkpoint was created or modified."
+        ),
+        "all_reused_without_retraining": all(row["reused_without_retraining"] for row in rows) if rows else None,
+        "rows": rows,
+    }
+    save_json(result, Path(PATH.raw_metrics_dir) / "train_checkpoint_reuse_audit.json")
+    write_csv(rows, Path(PATH.table_dir) / "train_checkpoint_reuse_audit.csv")
+    return result
+
+
 def data_cache_exists():
     if not getattr(DATA, "use_cache", True):
         return False
@@ -146,17 +222,37 @@ def stage_done(stage):
                 "train_res.json",
                 "phase2_summary.json",
                 "phase2_checkpoint_comparison.json",
+                "train_checkpoint_reuse_audit.json",
                 "train_manifest.json",
             ]
         )
         and final_model_checkpoints_exist(),
         "sae": lambda: all(
             (raw / name).exists()
-            for name in ["sae_res.json", "phase4a_summary.json", "sae_manifest.json"]
+            for name in (
+                [
+                    "sae_res.json",
+                    "phase4a_summary.json",
+                    "phase4a_sae_sweep_conclusions.json",
+                    "sae_manifest.json",
+                ]
+                + (
+                    ["phase4b_feature_stability.json"]
+                    if getattr(SAE, "run_feature_stability", True)
+                    else []
+                )
+            )
         ),
         "eval": lambda: all(
             (raw / name).exists()
-            for name in ["eval_res.json", "phase5_summary.json", "eval_manifest.json"]
+            for name in (
+                ["eval_res.json", "phase5_summary.json", "eval_manifest.json"]
+                + (
+                    ["phase5_feature_case_studies.json"]
+                    if getattr(EVAL, "run_feature_case_study", True)
+                    else []
+                )
+            )
         ),
         "attention": lambda: attention_outputs_exist(),
         "phase3": lambda: attention_outputs_exist(),
@@ -604,7 +700,10 @@ def run_train_stage():
     save_experiment_metadata(logger)
     data_res = load_or_run_data(logger)
     model_res = load_or_run_model(logger)
-    return load_or_run_train(model_res, data_res, logger)
+    before = train_checkpoint_snapshot()
+    train_res = load_or_run_train(model_res, data_res, logger)
+    write_train_checkpoint_reuse_audit(before, train_checkpoint_snapshot(), train_res)
+    return train_res
 
 
 def run_sae_stage():
@@ -613,7 +712,9 @@ def run_sae_stage():
     save_experiment_metadata(logger)
     data_res = load_or_run_data(logger)
     model_res = load_or_run_model(logger)
+    before = train_checkpoint_snapshot()
     train_res = load_or_run_train(model_res, data_res, logger)
+    write_train_checkpoint_reuse_audit(before, train_checkpoint_snapshot(), train_res)
     return load_or_run_sae(train_res, data_res, logger)
 
 
@@ -623,7 +724,9 @@ def run_eval_stage():
     save_experiment_metadata(logger)
     data_res = load_or_run_data(logger)
     model_res = load_or_run_model(logger)
+    before = train_checkpoint_snapshot()
     train_res = load_or_run_train(model_res, data_res, logger)
+    write_train_checkpoint_reuse_audit(before, train_checkpoint_snapshot(), train_res)
     sae_res = load_or_run_sae(train_res, data_res, logger)
     return load_or_run_eval(train_res, sae_res, data_res, logger)
 
@@ -707,9 +810,11 @@ def clear_models(task_name):
         "train_res.json",
         "phase2_summary.json",
         "phase2_checkpoint_comparison.json",
+        "train_checkpoint_reuse_audit.json",
         "train_manifest.json",
     ]:
         remove_path(paths["raw_metrics_dir"] / name)
+    remove_path(paths["table_dir"] / "train_checkpoint_reuse_audit.csv")
     clear_attention(task_name)
     maybe_prepare_current_task(task_name)
 
@@ -727,10 +832,25 @@ def clear_attention(task_name):
 def clear_sae(task_name):
     paths = paths_for_task(task_name)
     remove_path(paths["ckpt_dir"] / "saes")
-    for name in ["sae_res.json", "phase4a_summary.json", "sae_manifest.json"]:
+    for name in [
+        "sae_res.json",
+        "phase4a_summary.json",
+        "phase4a_sae_sweep_conclusions.json",
+        "phase4b_feature_stability.json",
+        "sae_manifest.json",
+    ]:
         remove_path(paths["raw_metrics_dir"] / name)
-    for name in ["phase4a_sae_sweep_summary.csv"]:
+    for name in [
+        "phase4a_sae_runs.csv",
+        "phase4a_sae_summary.csv",
+        "phase4a_sae_sweep_summary.csv",
+        "phase4a_sae_sweep_conclusions.csv",
+        "phase4b_feature_stability_pairs.csv",
+        "phase4b_feature_stability_summary.csv",
+    ]:
         remove_path(paths["table_dir"] / name)
+    remove_path(paths["figure_dir"] / "summary" / "phase4a")
+    remove_path(paths["figure_dir"] / "summary" / "phase4b")
     maybe_prepare_current_task(task_name)
 
 
@@ -1178,7 +1298,10 @@ def run():
 
     data_res = load_or_run_data(logger) if needs_data else None
     model_res = load_or_run_model(logger) if needs_model else None
+    train_checkpoint_before = train_checkpoint_snapshot() if needs_train else None
     train_res = load_or_run_train(model_res, data_res, logger) if needs_train else None
+    if needs_train:
+        write_train_checkpoint_reuse_audit(train_checkpoint_before, train_checkpoint_snapshot(), train_res)
     attention_res = (
         load_or_run_attention(train_res, data_res, model_res, logger)
         if PIPELINE.run_attention and train_res is not None

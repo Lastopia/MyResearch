@@ -25,6 +25,7 @@ from utils import (
 from visualize import (
     plot_metric_curves,
     plot_phase4a_summary_figures,
+    plot_phase4b_stability_figures,
     plot_sae_health_curves,
     plot_sae_training_curves,
 )
@@ -124,11 +125,22 @@ class SelfSAE:
         model.load_state_dict(ckpt["model"])
 
     def stage_outputs(self):
-        return [
+        outputs = [
             Path(PATH.raw_metrics_dir) / "sae_res.json",
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
+            Path(PATH.raw_metrics_dir) / "phase4a_sae_sweep_conclusions.json",
             Path(PATH.table_dir) / "phase4a_sae_sweep_summary.csv",
+            Path(PATH.table_dir) / "phase4a_sae_sweep_conclusions.csv",
         ]
+        if getattr(self.sae_cfg, "run_feature_stability", True):
+            outputs.extend(
+                [
+                    Path(PATH.raw_metrics_dir) / "phase4b_feature_stability.json",
+                    Path(PATH.table_dir) / "phase4b_feature_stability_pairs.csv",
+                    Path(PATH.table_dir) / "phase4b_feature_stability_summary.csv",
+                ]
+            )
+        return outputs
 
     def stage_manifest_path(self):
         return Path(PATH.raw_metrics_dir) / "sae_manifest.json"
@@ -500,6 +512,169 @@ class SelfSAE:
             summary_rows.append(row)
         return summary_rows
 
+    def sweep_conclusion_rows(self, sweep_summary_rows):
+        primary_dict = int(getattr(self.sae_cfg, "primary_dictionary_size", self.sae_cfg.dictionary_sizes[0]))
+        primary_k = int(getattr(self.sae_cfg, "primary_topk", self.sae_cfg.topk_values[0]))
+
+        def ev(row):
+            value = row.get("explained_variance_mean")
+            return value if value is not None and math.isfinite(value) else None
+
+        by_group = {}
+        for row in sweep_summary_rows:
+            key = (row["model_name"], int(row["layer"]))
+            by_group.setdefault(key, []).append(row)
+
+        rows = []
+        for (model_name, layer), items in by_group.items():
+            primary = next(
+                (
+                    item
+                    for item in items
+                    if int(item["dict_size"]) == primary_dict and int(item["k"]) == primary_k
+                ),
+                None,
+            )
+            dict_items = [item for item in items if int(item["k"]) == primary_k and ev(item) is not None]
+            topk_items = [item for item in items if int(item["dict_size"]) == primary_dict and ev(item) is not None]
+            primary_ev = ev(primary) if primary else None
+
+            def sensitivity(axis_items, axis_name):
+                if not axis_items:
+                    return {}
+                best = max(axis_items, key=lambda item: ev(item))
+                worst = min(axis_items, key=lambda item: ev(item))
+                return {
+                    f"best_{axis_name}": best[axis_name],
+                    f"best_{axis_name}_explained_variance": ev(best),
+                    f"worst_{axis_name}": worst[axis_name],
+                    f"worst_{axis_name}_explained_variance": ev(worst),
+                    f"{axis_name}_explained_variance_range": ev(best) - ev(worst),
+                    f"{axis_name}_gain_over_primary": (
+                        ev(best) - primary_ev if primary_ev is not None else None
+                    ),
+                }
+
+            row = {
+                "model_name": model_name,
+                "layer": layer,
+                "primary_dict_size": primary_dict,
+                "primary_k": primary_k,
+                "primary_explained_variance": primary_ev,
+                "primary_validation_mse": primary.get("validation_mse_mean") if primary else None,
+                **sensitivity(dict_items, "dict_size"),
+                **sensitivity(topk_items, "k"),
+            }
+            rows.append(row)
+
+        aggregate = {}
+        for row in rows:
+            model_name = row["model_name"]
+            aggregate.setdefault(
+                model_name,
+                {
+                    "primary_explained_variance": [],
+                    "dict_size_explained_variance_range": [],
+                    "dict_size_gain_over_primary": [],
+                    "k_explained_variance_range": [],
+                    "k_gain_over_primary": [],
+                },
+            )
+            for metric in aggregate[model_name]:
+                value = row.get(metric)
+                if value is not None and math.isfinite(value):
+                    aggregate[model_name][metric].append(value)
+
+        aggregate_rows = []
+        for model_name, values in aggregate.items():
+            row = {"model_name": model_name, "layer": "all"}
+            for metric, metric_values in values.items():
+                stats = mean_std(metric_values)
+                row[f"{metric}_mean"] = stats["mean"]
+                row[f"{metric}_std"] = stats["std"]
+            aggregate_rows.append(row)
+
+        ranked = sorted(
+            aggregate_rows,
+            key=lambda item: (
+                item.get("primary_explained_variance_mean")
+                if item.get("primary_explained_variance_mean") is not None
+                else float("-inf")
+            ),
+            reverse=True,
+        )
+        for rank, row in enumerate(ranked, start=1):
+            row["primary_explained_variance_rank"] = rank
+
+        return rows, ranked
+
+    def sweep_conclusion_notes(self, aggregate_rows):
+        if not aggregate_rows:
+            return []
+        notes = []
+        by_primary = sorted(
+            aggregate_rows,
+            key=lambda row: row.get("primary_explained_variance_mean") or float("-inf"),
+            reverse=True,
+        )
+        notes.append(
+            "Primary SAE explained-variance ranking: "
+            + " > ".join(row["model_name"] for row in by_primary)
+        )
+        by_dict_sensitivity = sorted(
+            aggregate_rows,
+            key=lambda row: row.get("dict_size_explained_variance_range_mean") or float("-inf"),
+            reverse=True,
+        )
+        notes.append(
+            "Dictionary-size sensitivity ranking: "
+            + " > ".join(row["model_name"] for row in by_dict_sensitivity)
+        )
+        by_k_sensitivity = sorted(
+            aggregate_rows,
+            key=lambda row: row.get("k_explained_variance_range_mean") or float("-inf"),
+            reverse=True,
+        )
+        notes.append(
+            "Top-k sensitivity ranking: "
+            + " > ".join(row["model_name"] for row in by_k_sensitivity)
+        )
+        return notes
+
+    def configured_sae_runs(self):
+        explicit = getattr(self.sae_cfg, "sweep_configs", None)
+        runs = []
+        if explicit:
+            for item in explicit:
+                runs.append(
+                    {
+                        "dict_size": int(item["dict_size"]),
+                        "k": int(item["k"]),
+                        "seeds": [int(seed) for seed in item.get("seeds", self.sae_cfg.seeds)],
+                    }
+                )
+        else:
+            for dict_size in self.sae_cfg.dictionary_sizes:
+                for k in self.sae_cfg.topk_values:
+                    runs.append(
+                        {
+                            "dict_size": int(dict_size),
+                            "k": int(k),
+                            "seeds": [int(seed) for seed in self.sae_cfg.seeds],
+                        }
+                    )
+
+        seen = set()
+        deduped = []
+        for run in runs:
+            for seed in run["seeds"]:
+                key = (run["dict_size"], run["k"], seed)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append({"dict_size": run["dict_size"], "k": run["k"], "sae_seed": seed})
+        return deduped
+
     def existing_sae_checkpoint_path(self, model_name, model_seed, layer, dict_size, k, sae_seed):
         return (
             Path(PATH.ckpt_dir)
@@ -591,11 +766,216 @@ class SelfSAE:
             self.logger.log_stage_end(f"Phase 4a summary figures: wrote {len(paths)} overview files")
         return paths
 
+    def decoder_columns(self, sae):
+        weight = sae.decoder.weight.detach().float().cpu()
+        return F.normalize(weight.T, dim=1)
+
+    def mutual_nearest_matches(self, sim):
+        a_to_b = sim.argmax(dim=1)
+        b_to_a = sim.argmax(dim=0)
+        a_idx = torch.arange(sim.size(0))
+        keep = b_to_a[a_to_b] == a_idx
+        matched_a = a_idx[keep]
+        matched_b = a_to_b[keep]
+        scores = sim[matched_a, matched_b]
+        return matched_a, matched_b, scores
+
+    def matched_activation_correlations(self, acts_a, acts_b, matched_a, matched_b):
+        if matched_a.numel() == 0:
+            return torch.empty(0)
+        xa = acts_a[:, matched_a].float()
+        xb = acts_b[:, matched_b].float()
+        xa = xa - xa.mean(dim=0, keepdim=True)
+        xb = xb - xb.mean(dim=0, keepdim=True)
+        denom = xa.square().sum(dim=0).sqrt() * xb.square().sum(dim=0).sqrt()
+        return (xa * xb).sum(dim=0) / denom.clamp_min(1e-9)
+
+    @torch.no_grad()
+    def encode_for_stability(self, item, raw_acts):
+        loaded = load_sae_item(item, self.device)
+        sae = loaded["sae"]
+        stats = loaded["normalization"]
+        data = self.normalize(raw_acts, stats).to(self.device)
+        features = sae.encode(data).float().cpu()
+        return loaded, features
+
+    def summarize_stability_pair(self, base_row, decoder_scores, activation_corrs):
+        thresholds = list(getattr(self.sae_cfg, "stability_similarity_thresholds", [0.5, 0.7, 0.9]))
+        row = {
+            **base_row,
+            "matched_feature_count": int(decoder_scores.numel()),
+            "matched_feature_fraction": (
+                decoder_scores.numel() / max(int(base_row["dict_size"]), 1)
+            ),
+            "decoder_cosine_mean": decoder_scores.mean().item() if decoder_scores.numel() else None,
+            "decoder_cosine_median": decoder_scores.median().item() if decoder_scores.numel() else None,
+            "decoder_cosine_p90": torch.quantile(decoder_scores, 0.9).item() if decoder_scores.numel() else None,
+            "activation_correlation_mean": activation_corrs.mean().item() if activation_corrs.numel() else None,
+            "activation_correlation_median": activation_corrs.median().item() if activation_corrs.numel() else None,
+            "activation_correlation_p90": torch.quantile(activation_corrs, 0.9).item()
+            if activation_corrs.numel()
+            else None,
+        }
+        for threshold in thresholds:
+            key = str(threshold).replace(".", "p")
+            row[f"decoder_cosine_ge_{key}_fraction"] = (
+                (decoder_scores >= threshold).float().mean().item() if decoder_scores.numel() else None
+            )
+            row[f"activation_correlation_ge_{key}_fraction"] = (
+                (activation_corrs >= threshold).float().mean().item() if activation_corrs.numel() else None
+            )
+        return row
+
+    def summarize_stability_rows(self, rows):
+        metrics = [
+            "matched_feature_count",
+            "matched_feature_fraction",
+            "decoder_cosine_mean",
+            "decoder_cosine_median",
+            "decoder_cosine_p90",
+            "activation_correlation_mean",
+            "activation_correlation_median",
+            "activation_correlation_p90",
+        ]
+        for threshold in getattr(self.sae_cfg, "stability_similarity_thresholds", [0.5, 0.7, 0.9]):
+            key = str(threshold).replace(".", "p")
+            metrics.append(f"decoder_cosine_ge_{key}_fraction")
+            metrics.append(f"activation_correlation_ge_{key}_fraction")
+        grouped = {}
+        for row in rows:
+            key = (row["model_name"], row["model_seed"], row["layer"], row["dict_size"], row["k"])
+            grouped.setdefault(key, {metric: [] for metric in metrics})
+            for metric in metrics:
+                value = row.get(metric)
+                if value is not None and math.isfinite(value):
+                    grouped[key][metric].append(value)
+        summary = []
+        for (model_name, model_seed, layer, dict_size, k), values in grouped.items():
+            row = {
+                "model_name": model_name,
+                "model_seed": model_seed,
+                "layer": layer,
+                "dict_size": dict_size,
+                "k": k,
+            }
+            for metric, metric_values in values.items():
+                stats = mean_std(metric_values)
+                row[f"{metric}_mean"] = stats["mean"]
+                row[f"{metric}_std"] = stats["std"]
+            summary.append(row)
+        return summary
+
+    def run_feature_stability(self, sae_res):
+        if not getattr(self.sae_cfg, "run_feature_stability", True):
+            return None
+        self.logger.log_stage_start("Phase 4b SAE feature stability")
+        target_dict_sizes = {int(x) for x in getattr(self.sae_cfg, "stability_dict_sizes", [])}
+        target_topks = {int(x) for x in getattr(self.sae_cfg, "stability_topk_values", [])}
+        pair_rows = []
+        nested = {}
+
+        for model_name, seeds in self.train_res.items():
+            nested[model_name] = {}
+            for model_seed, train_item in seeds.items():
+                nested[model_name][str(model_seed)] = {}
+                model = train_item["model"].to(self.device)
+                model.eval()
+                checkpoint_selection = train_item["train_state"]["checkpoint_selection"]
+                selected_checkpoint = self.selected_model_checkpoint(checkpoint_selection)
+                self.load_model_checkpoint(model, selected_checkpoint)
+                for layer in self.sae_cfg.layers:
+                    items = sae_res.get(model_name, {}).get(model_seed, {}).get(layer, [])
+                    grouped = {}
+                    for item in items:
+                        meta = item.get("meta", {})
+                        dict_size = int(meta.get("dict_size"))
+                        k = int(meta.get("k"))
+                        if target_dict_sizes and dict_size not in target_dict_sizes:
+                            continue
+                        if target_topks and k not in target_topks:
+                            continue
+                        grouped.setdefault((dict_size, k), []).append(item)
+                    if not grouped:
+                        continue
+                    raw_acts = self.collect_activations(
+                        model,
+                        layer,
+                        "valid",
+                        getattr(self.sae_cfg, "stability_max_tokens", 4096),
+                        model_name=model_name,
+                        model_seed=model_seed,
+                    )
+                    for (dict_size, k), group_items in grouped.items():
+                        if len(group_items) < 2:
+                            continue
+                        loaded = []
+                        for item in sorted(group_items, key=lambda x: x["meta"]["sae_seed"]):
+                            loaded_item, features = self.encode_for_stability(item, raw_acts)
+                            loaded.append(
+                                {
+                                    "item": loaded_item,
+                                    "features": features,
+                                    "decoder": self.decoder_columns(loaded_item["sae"]),
+                                }
+                            )
+                        for left_idx in range(len(loaded)):
+                            for right_idx in range(left_idx + 1, len(loaded)):
+                                left = loaded[left_idx]
+                                right = loaded[right_idx]
+                                sim = left["decoder"] @ right["decoder"].T
+                                matched_a, matched_b, decoder_scores = self.mutual_nearest_matches(sim)
+                                activation_corrs = self.matched_activation_correlations(
+                                    left["features"],
+                                    right["features"],
+                                    matched_a,
+                                    matched_b,
+                                )
+                                left_seed = left["item"]["meta"]["sae_seed"]
+                                right_seed = right["item"]["meta"]["sae_seed"]
+                                row = self.summarize_stability_pair(
+                                    {
+                                        "model_name": model_name,
+                                        "model_seed": model_seed,
+                                        "layer": layer,
+                                        "dict_size": dict_size,
+                                        "k": k,
+                                        "sae_seed_a": left_seed,
+                                        "sae_seed_b": right_seed,
+                                    },
+                                    decoder_scores,
+                                    activation_corrs,
+                                )
+                                pair_rows.append(row)
+                                nested[model_name][str(model_seed)].setdefault(str(layer), []).append(row)
+        summary_rows = self.summarize_stability_rows(pair_rows)
+        result = {
+            "phase": "4b",
+            "design": {
+                "matching": "mutual_nearest_neighbor_on_decoder_cosine",
+                "activation_correlation": "computed_on_matched_features_using_same_validation_residual_tokens",
+                "stability_max_tokens": getattr(self.sae_cfg, "stability_max_tokens", 4096),
+                "dict_sizes": sorted(target_dict_sizes) if target_dict_sizes else "all",
+                "topk_values": sorted(target_topks) if target_topks else "all",
+                "thresholds": list(getattr(self.sae_cfg, "stability_similarity_thresholds", [0.5, 0.7, 0.9])),
+            },
+            "summary_rows": summary_rows,
+            "pair_rows": pair_rows,
+            "nested": nested,
+        }
+        save_json(result, Path(PATH.raw_metrics_dir) / "phase4b_feature_stability.json")
+        write_csv(pair_rows, Path(PATH.table_dir) / "phase4b_feature_stability_pairs.csv")
+        write_csv(summary_rows, Path(PATH.table_dir) / "phase4b_feature_stability_summary.csv")
+        paths = plot_phase4b_stability_figures(PATH.raw_metrics_dir, PATH.figure_dir)
+        if paths:
+            self.logger.log_stage_end(f"Phase 4b stability figures: wrote {len(paths)} overview files")
+        self.logger.log_stage_end("Phase 4b SAE feature stability")
+        return result
+
     def run(self):
+        configured_runs = self.configured_sae_runs()
         self.logger.log_stage_start(
             f"SAE stage models={list(self.train_res.keys())} layers={list(self.sae_cfg.layers)} "
-            f"dict_sizes={list(self.sae_cfg.dictionary_sizes)} k={list(self.sae_cfg.topk_values)} "
-            f"sae_seeds={list(self.sae_cfg.seeds)}"
+            f"configured_runs={configured_runs}"
         )
         if (
             getattr(self.sae_cfg, "skip_completed_stage", True)
@@ -605,6 +985,7 @@ class SelfSAE:
             if loaded is not None:
                 self.logger.log_stage_end("skip SAE stage: existing outputs match config")
                 self.plot_summary_figures()
+                plot_phase4b_stability_figures(PATH.raw_metrics_dir, PATH.figure_dir)
                 return loaded
 
         sae_res = {}
@@ -624,22 +1005,20 @@ class SelfSAE:
                 for layer in self.sae_cfg.layers:
                     existing_layer_res = []
                     missing_existing = False
-                    for dict_size in self.sae_cfg.dictionary_sizes:
-                        for k in self.sae_cfg.topk_values:
-                            for sae_seed in self.sae_cfg.seeds:
-                                item = self.load_existing_sae_item(
-                                    model_name,
-                                    model_seed,
-                                    layer,
-                                    dict_size,
-                                    k,
-                                    sae_seed,
-                                    selected_checkpoint,
-                                )
-                                if item is None:
-                                    missing_existing = True
-                                else:
-                                    existing_layer_res.append(item)
+                    for run_spec in configured_runs:
+                        item = self.load_existing_sae_item(
+                            model_name,
+                            model_seed,
+                            layer,
+                            run_spec["dict_size"],
+                            run_spec["k"],
+                            run_spec["sae_seed"],
+                            selected_checkpoint,
+                        )
+                        if item is None:
+                            missing_existing = True
+                        else:
+                            existing_layer_res.append(item)
                     if not missing_existing and existing_layer_res:
                         self.logger.log_stage_end(
                             f"SAE reuse existing checkpoints {model_name} seed {model_seed} layer {layer}"
@@ -680,23 +1059,21 @@ class SelfSAE:
                         f"train_tokens={train_acts.size(0)} valid_tokens={valid_acts.size(0)}"
                     )
                     layer_res = []
-                    for dict_size in self.sae_cfg.dictionary_sizes:
-                        for k in self.sae_cfg.topk_values:
-                            for sae_seed in self.sae_cfg.seeds:
-                                layer_res.append(
-                                    self.train_one_sae(
-                                        train_acts,
-                                        valid_acts,
-                                        model_name,
-                                        model_seed,
-                                        layer,
-                                        dict_size,
-                                        k,
-                                        sae_seed,
-                                        stats,
-                                        selected_checkpoint,
-                                    )
-                                )
+                    for run_spec in configured_runs:
+                        layer_res.append(
+                            self.train_one_sae(
+                                train_acts,
+                                valid_acts,
+                                model_name,
+                                model_seed,
+                                layer,
+                                run_spec["dict_size"],
+                                run_spec["k"],
+                                run_spec["sae_seed"],
+                                stats,
+                                selected_checkpoint,
+                            )
+                        )
                     sae_res[model_name][model_seed][layer] = layer_res
                     serializable[model_name][str(model_seed)][str(layer)] = [
                         {
@@ -713,6 +1090,7 @@ class SelfSAE:
         rows = self.flatten_rows(serializable)
         summary_rows = self.summarize_rows(rows)
         sweep_summary_rows = self.summarize_sweep_rows(rows)
+        sweep_conclusion_rows, sweep_conclusion_aggregate_rows = self.sweep_conclusion_rows(sweep_summary_rows)
         write_csv(rows, Path(PATH.table_dir) / "phase4a_sae_runs.csv")
         write_csv(
             summary_rows,
@@ -722,12 +1100,17 @@ class SelfSAE:
             sweep_summary_rows,
             Path(PATH.table_dir) / "phase4a_sae_sweep_summary.csv",
         )
+        write_csv(
+            sweep_conclusion_rows + sweep_conclusion_aggregate_rows,
+            Path(PATH.table_dir) / "phase4a_sae_sweep_conclusions.csv",
+        )
         save_json(
             {
                 "phase": "4a",
                 "design": {
                     "dictionary_size": self.sae_cfg.dictionary_sizes,
                     "k": self.sae_cfg.topk_values,
+                    "configured_runs": configured_runs,
                     "layers": self.sae_cfg.layers,
                     "sae_seeds": self.sae_cfg.seeds,
                     "activation_site": self.sae_cfg.activation_site,
@@ -739,10 +1122,30 @@ class SelfSAE:
                 },
                 "summary_rows": summary_rows,
                 "sweep_summary_rows": sweep_summary_rows,
+                "sweep_conclusion_rows": sweep_conclusion_rows,
+                "sweep_conclusion_aggregate_rows": sweep_conclusion_aggregate_rows,
+                "sweep_conclusion_notes": self.sweep_conclusion_notes(sweep_conclusion_aggregate_rows),
                 "run_rows": rows,
             },
             Path(PATH.raw_metrics_dir) / "phase4a_summary.json",
         )
+        save_json(
+            {
+                "phase": "4a_sweep_conclusions",
+                "design": {
+                    "primary_dictionary_size": getattr(self.sae_cfg, "primary_dictionary_size", None),
+                    "primary_topk": getattr(self.sae_cfg, "primary_topk", None),
+                    "purpose": (
+                        "Summarize whether SAE conclusions are sensitive to dictionary size or top-k."
+                    ),
+                },
+                "layer_rows": sweep_conclusion_rows,
+                "aggregate_rows": sweep_conclusion_aggregate_rows,
+                "notes": self.sweep_conclusion_notes(sweep_conclusion_aggregate_rows),
+            },
+            Path(PATH.raw_metrics_dir) / "phase4a_sae_sweep_conclusions.json",
+        )
+        self.run_feature_stability(sae_res)
         self.plot_summary_figures()
         save_manifest(self.stage_manifest_path(), "sae", self.stage_config(), self.stage_outputs())
         self.logger.log_stage_end("SAE stage")

@@ -429,6 +429,47 @@ def plot_phase4a_summary_figures(raw_metrics_dir, figure_dir):
     return paths
 
 
+def plot_phase4b_stability_figures(raw_metrics_dir, figure_dir):
+    raw_metrics_dir = Path(raw_metrics_dir)
+    summary_dir = Path(figure_dir) / "summary" / "phase4b"
+    summary_path = raw_metrics_dir / "phase4b_feature_stability.json"
+    if not summary_path.exists():
+        return []
+    summary = load_json(summary_path)
+    rows = summary.get("summary_rows", [])
+    paths = []
+    for metric, title, ylabel in [
+        (
+            "matched_feature_fraction_mean",
+            "Phase 4b Matched Feature Fraction Across SAE Seeds",
+            "fraction",
+        ),
+        (
+            "decoder_cosine_mean_mean",
+            "Phase 4b Decoder Cosine Stability Across SAE Seeds",
+            "decoder cosine",
+        ),
+        (
+            "activation_correlation_mean_mean",
+            "Phase 4b Activation Correlation Stability Across SAE Seeds",
+            "activation correlation",
+        ),
+        (
+            "decoder_cosine_ge_0p7_fraction_mean",
+            "Phase 4b Decoder Cosine >= 0.7 Fraction",
+            "fraction",
+        ),
+        (
+            "activation_correlation_ge_0p7_fraction_mean",
+            "Phase 4b Activation Correlation >= 0.7 Fraction",
+            "fraction",
+        ),
+    ]:
+        if any(row.get(metric) is not None for row in rows):
+            paths.append(_plot_grouped_layer_metric(rows, metric, summary_dir / f"phase4b_{metric}.png", title, ylabel))
+    return paths
+
+
 def plot_phase5_summary_figures(raw_metrics_dir, figure_dir):
     raw_metrics_dir = Path(raw_metrics_dir)
     summary_dir = Path(figure_dir) / "summary" / "phase5"
@@ -467,6 +508,42 @@ def plot_phase5_summary_figures(raw_metrics_dir, figure_dir):
     ]:
         if any(row.get(metric) is not None for row in rows):
             paths.append(_plot_grouped_layer_metric(rows, metric, summary_dir / f"phase5_{metric}.png", title, ylabel))
+    overlap_path = raw_metrics_dir / "phase5_feature_overlap_across_sae_seeds.json"
+    if overlap_path.exists():
+        overlap = load_json(overlap_path)
+        overlap_rows = overlap.get("rows", [])
+        for metric, title, ylabel in [
+            (
+                "same_label_fraction",
+                "Phase 5 Feature Label Overlap Across SAE Seeds",
+                "same label fraction",
+            ),
+            (
+                "content_only_preservation_fraction",
+                "Phase 5 Content-Only Feature Preservation Across SAE Seeds",
+                "preservation fraction",
+            ),
+            (
+                "position_only_preservation_fraction",
+                "Phase 5 Position-Only Feature Preservation Across SAE Seeds",
+                "preservation fraction",
+            ),
+            (
+                "mixed_preservation_fraction",
+                "Phase 5 Mixed Feature Preservation Across SAE Seeds",
+                "preservation fraction",
+            ),
+        ]:
+            if any(row.get(metric) is not None for row in overlap_rows):
+                paths.append(
+                    _plot_grouped_layer_metric(
+                        overlap_rows,
+                        metric,
+                        summary_dir / f"phase5_overlap_{metric}.png",
+                        title,
+                        ylabel,
+                    )
+                )
     return paths
 
 
