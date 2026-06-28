@@ -189,7 +189,7 @@ cache/dataset/tokenizers/gpt2/
 默认主实验模型列表：
 
 ```python
-MODEL.model_names = ["rope", "pope", "mod_pope", "alibi", "cable"]
+MODEL.model_names = ["rope", "pope", "cable", "mod_pope", "alibi"]
 TRAIN.seeds = [41, 42, 43]
 ```
 
@@ -206,7 +206,7 @@ python main.py
 默认阶段顺序：
 
 1. `data.py`：加载/缓存数据。
-2. `model.py`：构建 `rope / pope / mod_pope / alibi / cable` 模型。
+2. `model.py`：构建 `rope / pope / cable / mod_pope / alibi` 模型。
 3. `train.py`：Phase 2 训练评估 + Phase 3 attention 机制分析。
 4. `sae.py`：Phase 4a TopK-SAE。
 5. `eval.py`：Phase 5 disentanglement benchmark。
@@ -360,7 +360,7 @@ OPENAI_API_KEY=sk_your_key
 
 在两张 A100 条件下，建议先跑：
 
-- Phase 2/3：完整 `rope / pope / mod_pope / alibi / cable × 3 seeds`
+- Phase 2/3：完整 `rope / pope / cable / mod_pope / alibi × 3 seeds`
 - Phase 4a：代表层 `[2, 6, 10]`，固定 dictionary size 和 Top-K
 - Phase 5：限流 probe 和 feature-level 指标
 - Phase 6：先 `dry_run=True`，确认 prompt 和样例格式，再少量 OpenAI-run

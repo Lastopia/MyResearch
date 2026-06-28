@@ -48,7 +48,7 @@ DATA = SimpleNamespace(
 
 MODEL = SimpleNamespace(
     # GPT-2 small shape trained from scratch.
-    model_names=["rope", "pope", "mod_pope", "alibi", "cable"],
+    model_names=["rope", "pope", "cable", "mod_pope", "alibi"],
     baseline_model_name="rope",
     run_model_checks=True,
     max_parameter_ratio_delta=0.01,

@@ -38,7 +38,7 @@ POSITION_ENCODING_REGISTRY = {
     "cable": {
         "description": "CABLE adds learned context-aware relative-distance bias directly to attention logits.",
         "uses_qk_rotation": False,
-        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim",
+        "trainable_position_parameters": "2 * n_layers * (d_model * n_heads + n_heads)",
     },
 }
 
@@ -154,20 +154,17 @@ class ALiBiBias(nn.Module):
 
 
 class CableBias(nn.Module):
-    def __init__(self, n_heads, head_dim):
+    def __init__(self, d_model, n_heads):
         super().__init__()
-        self.context_weight = nn.Parameter(torch.empty(n_heads, head_dim))
-        self.gate_weight = nn.Parameter(torch.empty(n_heads, head_dim))
-        nn.init.normal_(self.context_weight, mean=0.0, std=0.02)
-        nn.init.normal_(self.gate_weight, mean=0.0, std=0.02)
+        self.cable_layer = nn.Linear(d_model, n_heads)
+        self.cable_layer_scale = nn.Linear(d_model, n_heads)
 
-    def forward(self, q):
-        span = F.relu(torch.einsum("bhtd,hd->bht", q.float(), self.context_weight.float()))
-        gate = torch.sigmoid(torch.einsum("bhtd,hd->bht", q.float(), self.gate_weight.float()))
-        cumulative_span = torch.cumsum(span, dim=-1)
-        relative_span = cumulative_span[:, :, :, None] - cumulative_span[:, :, None, :]
-        bias = -relative_span * gate[:, :, :, None]
-        return bias.to(dtype=q.dtype, device=q.device)
+    def forward(self, x, dtype):
+        sums = torch.cumsum(-F.relu(self.cable_layer(x.float())), dim=1).permute(0, 2, 1)
+        relative_bias = sums.unsqueeze(3) - sums.unsqueeze(2)
+        bias_weights = F.softplus(self.cable_layer_scale(x.float())).permute(0, 2, 1)
+        bias = bias_weights.unsqueeze(-1) * relative_bias
+        return bias.to(dtype=dtype, device=x.device)
 
 
 class CausalSelfAttention(nn.Module):
@@ -198,7 +195,7 @@ class CausalSelfAttention(nn.Module):
             else None
         )
         self.alibi = ALiBiBias(self.n_heads, model_cfg.seq_len) if position_type in ALIBI_TYPES else None
-        self.cable = CableBias(self.n_heads, self.head_dim) if position_type in CABLE_TYPES else None
+        self.cable = CableBias(self.d_model, self.n_heads) if position_type in CABLE_TYPES else None
 
     def forward(self, x, return_attention=False):
         bsz, seq_len, _ = x.shape
@@ -225,7 +222,8 @@ class CausalSelfAttention(nn.Module):
             if self.alibi is not None:
                 additive_bias = self.alibi(seq_len, q.dtype, q.device)
             if self.cable is not None:
-                additive_bias = self.cable(q) if additive_bias is None else additive_bias + self.cable(q)
+                cable_bias = self.cable(x, q.dtype)
+                additive_bias = cable_bias if additive_bias is None else additive_bias + cable_bias
             if additive_bias is not None:
                 attn_mask = additive_bias
                 causal = torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool).tril()
@@ -246,7 +244,7 @@ class CausalSelfAttention(nn.Module):
         if self.alibi is not None:
             logits = logits + self.alibi(seq_len, logits.dtype, logits.device)
         if self.cable is not None:
-            logits = logits + self.cable(q).to(dtype=logits.dtype, device=logits.device)
+            logits = logits + self.cable(x, logits.dtype)
         mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
         logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
         attn = F.softmax(logits.float(), dim=-1).to(v.dtype)
@@ -385,7 +383,7 @@ class SelfTransformer:
             meta["alibi_bias_parameters"] = 0
         if model_name in CABLE_TYPES:
             meta["trainable_position_parameters"] = (
-                2 * self.model_cfg.n_layers * self.model_cfg.n_heads * self.head_dim
+                2 * self.model_cfg.n_layers * (self.model_cfg.d_model * self.model_cfg.n_heads + self.model_cfg.n_heads)
             )
         return meta
 
