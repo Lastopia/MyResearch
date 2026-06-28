@@ -48,7 +48,7 @@ DATA = SimpleNamespace(
 
 MODEL = SimpleNamespace(
     # GPT-2 small shape trained from scratch.
-    model_names=["rope", "pope", "alibi"],
+    model_names=["rope", "pope", "mod_pope", "alibi", "cable"],
     baseline_model_name="rope",
     run_model_checks=True,
     max_parameter_ratio_delta=0.01,
@@ -97,7 +97,7 @@ TRAIN = SimpleNamespace(
     secondary_checkpoint_rule="validation_loss_matched",
     validation_loss_match_target=None,
     save_eval_checkpoints=False,
-    save_best_checkpoint=True,
+    save_best_checkpoint=False,
     keep_only_latest_best_checkpoint=True,
     save_optimizer_checkpoints=False,
     save_final_optimizer=True,

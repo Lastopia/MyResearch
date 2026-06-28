@@ -22,16 +22,30 @@ POSITION_ENCODING_REGISTRY = {
         "description": "PoPE keeps pair magnitudes and replaces pair directions with position phases plus per-head Q/K phase bias.",
         "uses_qk_rotation": True,
         "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
+        "pope_type": "origin",
+    },
+    "mod_pope": {
+        "description": "Modified PoPE variant using raw pair magnitude instead of the origin softplus magnitude.",
+        "uses_qk_rotation": True,
+        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim / 2",
+        "pope_type": "modify",
     },
     "alibi": {
         "description": "ALiBi adds fixed per-head linear relative-distance bias directly to attention logits.",
         "uses_qk_rotation": False,
         "trainable_position_parameters": 0,
     },
+    "cable": {
+        "description": "CABLE adds learned context-aware relative-distance bias directly to attention logits.",
+        "uses_qk_rotation": False,
+        "trainable_position_parameters": "2 * n_layers * n_heads * head_dim",
+    },
 }
 
-POPE_TYPES = {"pope"}
+POPE_VARIANTS = {"pope": "origin", "mod_pope": "modify"}
+POPE_TYPES = set(POPE_VARIANTS)
 ALIBI_TYPES = {"alibi"}
+CABLE_TYPES = {"cable"}
 
 
 def rotate_half(x):
@@ -139,6 +153,23 @@ class ALiBiBias(nn.Module):
         return self.bias[:, :, :seq_len, :seq_len].to(dtype=dtype, device=device)
 
 
+class CableBias(nn.Module):
+    def __init__(self, n_heads, head_dim):
+        super().__init__()
+        self.context_weight = nn.Parameter(torch.empty(n_heads, head_dim))
+        self.gate_weight = nn.Parameter(torch.empty(n_heads, head_dim))
+        nn.init.normal_(self.context_weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.gate_weight, mean=0.0, std=0.02)
+
+    def forward(self, q):
+        span = F.relu(torch.einsum("bhtd,hd->bht", q.float(), self.context_weight.float()))
+        gate = torch.sigmoid(torch.einsum("bhtd,hd->bht", q.float(), self.gate_weight.float()))
+        cumulative_span = torch.cumsum(span, dim=-1)
+        relative_span = cumulative_span[:, :, :, None] - cumulative_span[:, :, None, :]
+        bias = -relative_span * gate[:, :, :, None]
+        return bias.to(dtype=q.dtype, device=q.device)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, model_cfg, position_type):
         super().__init__()
@@ -161,12 +192,13 @@ class CausalSelfAttention(nn.Module):
                 self.n_heads,
                 model_cfg.seq_len,
                 model_cfg.pope_base,
-                getattr(model_cfg, "pope_type", "modify"),
+                POPE_VARIANTS[position_type],
             )
             if position_type in POPE_TYPES
             else None
         )
         self.alibi = ALiBiBias(self.n_heads, model_cfg.seq_len) if position_type in ALIBI_TYPES else None
+        self.cable = CableBias(self.n_heads, self.head_dim) if position_type in CABLE_TYPES else None
 
     def forward(self, x, return_attention=False):
         bsz, seq_len, _ = x.shape
@@ -182,15 +214,20 @@ class CausalSelfAttention(nn.Module):
             if self.pope is None:
                 raise RuntimeError("PoPE applier was not initialized")
             q, k = self.pope(q, k)
-        elif self.position_type not in {"std", "alibi"}:
+        elif self.position_type not in {"std", "alibi", "cable"}:
             raise ValueError(f"Unknown position type: {self.position_type}")
 
         if not return_attention:
             dropout_p = self.dropout.p if self.training else 0.0
             attn_mask = None
             is_causal = True
+            additive_bias = None
             if self.alibi is not None:
-                attn_mask = self.alibi(seq_len, q.dtype, q.device)
+                additive_bias = self.alibi(seq_len, q.dtype, q.device)
+            if self.cable is not None:
+                additive_bias = self.cable(q) if additive_bias is None else additive_bias + self.cable(q)
+            if additive_bias is not None:
+                attn_mask = additive_bias
                 causal = torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool).tril()
                 attn_mask = attn_mask.masked_fill(~causal.view(1, 1, seq_len, seq_len), torch.finfo(q.dtype).min)
                 is_causal = False
@@ -208,6 +245,8 @@ class CausalSelfAttention(nn.Module):
         logits = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if self.alibi is not None:
             logits = logits + self.alibi(seq_len, logits.dtype, logits.device)
+        if self.cable is not None:
+            logits = logits + self.cable(q).to(dtype=logits.dtype, device=logits.device)
         mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
         logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
         attn = F.softmax(logits.float(), dim=-1).to(v.dtype)
@@ -344,6 +383,10 @@ class SelfTransformer:
             )
         if model_name in ALIBI_TYPES:
             meta["alibi_bias_parameters"] = 0
+        if model_name in CABLE_TYPES:
+            meta["trainable_position_parameters"] = (
+                2 * self.model_cfg.n_layers * self.model_cfg.n_heads * self.head_dim
+            )
         return meta
 
     def architecture_signature(self):
