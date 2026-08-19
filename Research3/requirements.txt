@@ -1,0 +1,7 @@
+torch>=2.2
+numpy>=1.26
+psutil>=5.9
+pytest>=8.0
+datasets>=2.18
+transformers>=4.40
+

@@ -1,0 +1,119 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+h1, h2 {
+  font-weight: 600;
+}
+
+h1 {
+  margin-bottom: 4px;
+}
+
+h2 {
+  margin-top: 30px;
+  font-size: 18px;
+}
+
+p {
+  margin-top: 0;
+  opacity: 0.72;
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+label {
+  display: grid;
+  gap: 5px;
+  font-size: 13px;
+}
+
+select {
+  min-width: 180px;
+  padding: 7px 9px;
+}
+
+.chart {
+  min-height: 280px;
+}
+
+.chart svg {
+  width: 100%;
+  height: auto;
+}
+
+.axis {
+  stroke: currentColor;
+  opacity: 0.4;
+}
+
+.bar {
+  fill: #4c78a8;
+  opacity: 0.8;
+}
+
+.seed-point {
+  fill: #f58518;
+  stroke: Canvas;
+  stroke-width: 1;
+}
+
+.value-label, .method-label {
+  fill: currentColor;
+  text-anchor: middle;
+  font-size: 13px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 9px 10px;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  text-align: left;
+  white-space: nowrap;
+}
+
+th {
+  font-weight: 600;
+}
+
+ul {
+  padding-left: 20px;
+}
+
+@media (max-width: 640px) {
+  main { padding: 16px; }
+  .controls, label, select { width: 100%; }
+}

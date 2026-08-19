@@ -1,0 +1,13 @@
+{
+  "jobs": [
+    {
+      "name": "concept_bus_v2_smoke_seed11",
+      "command": ["python", "main.py", "run", "--size", "small"],
+      "global_batch_size": 8,
+      "max_micro_batch_size": 8,
+      "estimated_model_memory_gb": 1.0,
+      "estimated_activation_memory_per_sample_gb": 0.01,
+      "profiling": false
+    }
+  ]
+}

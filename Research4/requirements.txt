@@ -1,0 +1,8 @@
+# Runtime
+torch>=2.1
+numpy>=1.26
+datasets>=3.0,<5
+tiktoken>=0.7
+
+# Verification
+pytest>=8

@@ -1,0 +1,12 @@
+DAPE
+====
+
+The DAPE-v1 + Kerple positional baseline in
+model/positional/dape_kerple.py is adapted from:
+
+  https://github.com/chuanyang-zheng/dape
+  commit bde344a844f2bd1f498b2bac70240dcda41c50c1
+
+The upstream repository is distributed under the Apache License 2.0.
+The local adaptation changes the GPT-NeoX integration into this project's
+PositionMethod interface and adds incremental-decoding support.

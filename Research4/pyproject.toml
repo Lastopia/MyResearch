@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "token-feature-dual-axis"
+version = "0.3.0"
+description = "Reproducible paper-scale DFF concept-bus Transformer experiments"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "numpy>=1.26",
+  "datasets>=3.0,<5",
+  "tiktoken>=0.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["dual_axis_transformer*"]
+
+[tool.setuptools.package-data]
+dual_axis_transformer = ["report_assets/*"]

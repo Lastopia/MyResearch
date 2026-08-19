@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concept Bus 实验报告</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Concept Bus 实验报告</h1>
+        <p id="generated-at"></p>
+      </div>
+      <div class="controls">
+        <label>阶段<select id="stage-select"></select></label>
+        <label>指标<select id="metric-select"></select></label>
+      </div>
+    </header>
+    <section aria-labelledby="chart-title">
+      <h2 id="chart-title">方法比较</h2>
+      <div id="chart" class="chart"></div>
+    </section>
+    <section aria-labelledby="table-title">
+      <h2 id="table-title">种子与汇总</h2>
+      <div class="table-wrap"><table id="summary-table"></table></div>
+    </section>
+    <section aria-labelledby="resource-title">
+      <h2 id="resource-title">运行资源</h2>
+      <div id="resources"></div>
+    </section>
+  </main>
+  <script src="data.js"></script>
+  <script src="report.js"></script>
+</body>
+</html>

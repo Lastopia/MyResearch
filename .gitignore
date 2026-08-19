@@ -1,6 +1,60 @@
+# Local secrets
 .env
-__pycache__/
-*.pyc
-cache/
-ckpt/
-output/
+.env.*
+!.env.example
+
+# Python bytecode, test caches, and virtual environments
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.codex_pycache/
+**/.coverage
+**/.coverage.*
+**/htmlcov/
+**/.tox/
+**/.nox/
+**/.venv/
+**/venv/
+
+# Editor and operating-system metadata
+.vscode/
+**/.idea/
+**/.DS_Store
+**/Thumbs.db
+
+# Downloaded datasets and reusable caches
+**/cache/
+**/caches/
+Research2/data/
+Research3/data/
+Research4/data/
+
+# Generated experiment artifacts
+**/ckpt/
+**/checkpoints/
+**/output/
+**/outputs/
+**/output*/
+**/logs/
+**/wandb/
+**/tensorboard/
+**/large/
+**/tmp/
+
+# Model and bulk artifact formats (defence in depth)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.jsonl
+*.zip
+
+# Research2 contains a local paper/video collection, not repository source.
+Research2/重要论文/
+
+# Local smoke/path verification artifacts
+**/server_path_check/
+**/server_smoke_test/
