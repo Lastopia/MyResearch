@@ -2,12 +2,14 @@
 
 本仓库统一管理四个相互独立、可分别运行的研究实验。每个实验保留自己的入口、配置、依赖与研究文档；请从对应目录启动，以避免同名模块和相对路径互相影响。
 
-| 目录 | 研究主题 | 使用说明 |
-| --- | --- | --- |
-| [`Research1/`](Research1/) | RoPE / PoPE 与 SAE 分析 | [`Research1/README.md`](Research1/README.md) |
-| [`Research2/`](Research2/) | Transformer attention、FFN 与 loss 机制变体 | [`Research2/README.md`](Research2/README.md) |
-| [`Research3/`](Research3/) | RoPE、ALiBi、CABLE 与 RA-CABLE 对照实验 | [`Research3/实验设计.md`](Research3/实验设计.md) |
-| [`Research4/`](Research4/) | FFN Concept Subspace Bus V2 | [`Research4/README.md`](Research4/README.md) |
+| 目录          | 研究主题                                  |
+| ----------- | ------------------------------------- |
+| `Research0` | 通用研究项目模版                              |
+| `Research1` | RoPE / PoPE 与 SAE 分析                  |
+| `Research2` | Transformer attention、FFN 与 loss 机制变体 |
+| `Research3` | RoPE、ALiBi、CABLE 与 RA-CABLE 对照实验      |
+| `Research4` | FFN Concept Subspace Bus V2           |
+| `Research5` | 双曲空间研究                                |
 
 ## 仓库约定
 
